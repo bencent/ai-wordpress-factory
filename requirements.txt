@@ -1,0 +1,22 @@
+# AI WordPress Factory 依賴包
+
+# AI 和語言模型
+openai>=1.0.0
+langchain>=0.1.0
+
+# HTTP 客戶端
+requests>=2.31.0
+httpx>=0.25.0
+
+# WordPress REST API
+wordpress-api>=2.0.0
+
+# 數據處理
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+
+# 搜索 API
+google-api-python-client>=2.100.0
+
+# 工具和實用程序
+python-dateutil>=2.8.0
