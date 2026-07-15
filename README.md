@@ -27,6 +27,130 @@
 
 ---
 
+## 🏗️ Enterprise AI Agent Workflow
+
+本專案採用企業級 AI 代理人工作流程，提供結構化、可擴展的内容生成管道。
+
+---
+
+## 🏛️ Architecture
+
+系統架構包含以下核心組件：
+- **State**: 工作流程狀態管理
+- **Agent**: AI 代理人模組
+- **Workflow**: 工作流程協調
+- **Contract**: 代理人合約定義
+- **Router**: 任務路由與分配
+
+詳細架構文檔請參閱 [`docs/architecture/`](docs/architecture/) 目錄。
+
+---
+
+## 📚 Learning Roadmap
+
+### 第一層：基礎概念
+- [State](docs/chapters/02-State.md) - 狀態管理機制
+- [Dictionary](docs/chapters/03-Dictionary.md) - 在專案中雙向がる動的用語集
+- [Function](docs/chapters/04-Function.md) - 核心函數與工具
+- [Agent](docs/chapters/01-Agent.md) - AI 代理人基礎
+
+### 第二層：核心模組
+- [Planner](docs/chapters/05-Planner.md) - 內容規劃代理人
+- [Research](docs/chapters/06-Research.md) - 智能調研代理人
+- [Writer](docs/chapters/07-Writer.md) - 專業撰寫代理人
+- [Validator](docs/chapters/08-Validator.md) - 資料驗證模組
+
+### 第三層：進階主題
+- 工作流程自定義
+- 代理人擴展開發
+- 系統整合與部署
+
+更多教材內容請參閱 [`docs/chapters/`](docs/chapters/) 目錄。
+
+---
+
+## 📁 Folder Structure
+
+```
+ai-wordpress-factory/
+├── main.py              # 系統入口，協調工作流程
+├── config.py            # 全局配置管理
+├── state.py             # 工作流程狀態管理
+├── requirements.txt     # Python 依賴包
+│
+├── agents/              # AI 代理人模組
+│   ├── __init__.py      # 代理人基類
+│   ├── planner.py       # 規劃代理人
+│   ├── research.py      # 調研代理人
+│   ├── writer.py        # 撰寫代理人
+│   ├── seo.py           # SEO 代理人
+│   └── reviewer.py      # 審閱代理人
+│
+├── tools/               # 外部工具模組
+│   ├── __init__.py      # 工具基類
+│   ├── search.py        # 搜索工具
+│   └── wordpress.py     # WordPress 發布工具
+│
+├── docs/                # 文檔
+│   ├── architecture/    # 架構文檔
+│   │   ├── State.md
+│   │   ├── Workflow.md
+│   │   ├── Agent.md
+│   │   ├── Contract.md
+│   │   └── Router.md
+│   ├── chapters/        # 教材章節
+│   │   ├── 01-Agent.md
+│   │   ├── 02-State.md
+│   │   ├── 03-Dictionary.md
+│   │   ├── 04-Function.md
+│   │   ├── 05-Planner.md
+│   │   ├── 06-Research.md
+│   │   ├── 07-Writer.md
+│   │   └── 08-Validator.md
+│   └── glossary/        # 術語詞彙
+│       └── Glossary.md
+│
+└── prompts/             # AI 指令文件
+    ├── planner.md        # 規劃代理人提示
+    └── writer.md         # 撰寫代理人提示
+```
+
+---
+
+## 📊 Current Progress
+
+### ✅ 已完成
+- [x] 核心 AI 代理人開發（Planner, Research, Writer, SEO, Reviewer）
+- [x] WordPress REST API 整合
+- [x] 工作流程狀態管理.system
+- [x] 基本配置管理
+- [x] 教材文檔架構建立
+- [x] 架構文檔創建
+- [x] 術語詞彙集
+
+### 🚧 進行中
+- [ ]進階工作流程自定義
+- [ ] 代理人智能協作機制
+- [ ] 系統效能填優化
+- [ ] 更多教材內容補充
+
+### 📋 待完成
+- [ ] 更多 AI 模型支持
+- [ ] 多語言內容生成
+- [ ] 批次處理功能
+- [ ] 監控與日誌系統增強
+
+---
+
+## 🔜 Next Chapter
+
+接下來將專注於：
+- **代理人智能協作**：優化多代理人之間的協作流程
+- **系統效能**：提升大規模內容生成的效率
+- **教材完善**：補充更多實用案例和最佳實踐
+
+---
+
 ## 🛠️ 技術棧
 
 - **程式語言**: Python 3.8+
@@ -154,35 +278,6 @@ else:
 
 # 保存狀態
 factory.save_state("workflow_state.json")
-```
-
----
-
-## 📁 專案結構
-
-```
-ai-wordpress-factory/
-├── main.py              # 系統入口，協調工作流程
-├── config.py            # 全局配置管理
-├── state.py             # 工作流程狀態管理
-├── requirements.txt     # Python 依賴包
-│
-├── agents/              # AI 代理人模組
-│   ├── __init__.py      # 代理人基類
-│   ├── planner.py       # 規劃代理人
-│   ├── research.py      # 調研代理人
-│   ├── writer.py        # 撰寫代理人
-│   ├── seo.py           # SEO 代理人
-│   └── reviewer.py      # 審閱代理人
-│
-├── tools/               # 外部工具模組
-│   ├── __init__.py      # 工具基類
-│   ├── search.py        # 搜索工具
-│   └── wordpress.py     # WordPress 發布工具
-│
-└── prompts/             # AI 指令文件
-    ├── planner.md        # 規劃代理人提示
-    └── writer.md         # 撰寫代理人提示
 ```
 
 ---
