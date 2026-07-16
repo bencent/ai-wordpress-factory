@@ -2,10 +2,23 @@
 
 一個**自動化的 AI 驅動 WordPress內容生成和發布系統**，能夠協助你快速、高質量地生成博客文章、頁面等內容，並自動發布到 WordPress 網站。
 
+> **企業級 AI 代理人專案**
+> 從 WordPress 專用內容工廠，演進至通用 AI Agent 平台
+
 - 🚀 **自動化工作流程**：從規劃、調研、撰寫、SEO 優化到審閱和發布，一鍵完成
 - ✍️ **高質量內容**：使用先進的 AI 模型生成原創、專業的內容
 - 🔍 **智能 SEO**: 自動優化內容的搜索引擎可見性
 - 📊 **靈活可配置**：支持自定義配置和工作流程
+
+---
+
+## 🎯 Vision
+
+**AI WordPress Factory is not just an AI demo.**
+
+它是一個企業級的 AI 代理人系統，專為自動化完整的 WordPress 内容工作流程而設計，並逐步演進為通用的 AI Agent 平台。
+
+**願景**：打造一個**企業級、模塊化、可擴展的 AI 代理人生態系統**，從內容生成與發布出發，逐步發展成為通用的 AI Agent 平台。
 
 ---
 
@@ -27,9 +40,18 @@
 
 ---
 
+## 🎯 Goals
+
+- 🧠 **Learn AI Agent Architecture** - 學習企業級 AI 代理人架構設計
+- 🏗️ **Build Enterprise Workflow** - 構建可擴展的工作流程系統
+- 🐍 **Practice Python with real projects** - 通過實戰專案精進 Python 技能
+- 📁 **Create a Portfolio for AI Engineer roles** - 建立 AI 工程師作品集
+
+---
+
 ## 🏗️ Enterprise AI Agent Workflow
 
-本專案採用企業級 AI 代理人工作流程，提供結構化、可擴展的内容生成管道。
+本專案採用企業級 AI 代理人工作流程，提供結構化、可擴展的內容生成管道。
 
 ---
 
@@ -41,6 +63,40 @@
 - **Workflow**: 工作流程協調
 - **Contract**: 代理人合約定義
 - **Router**: 任務路由與分配
+- **Supervisor**: 代理人監督與協調
+
+### 架構演進路線
+
+#### Phase 1: 單一工作流程 (✅ 已完成)
+```
+Task → Planner → Research → Writer → SEO → Reviewer → Publish
+```
+
+#### Phase 2: 多代理人協作 (🚧 進行中)
+```
+Task → Supervisor
+       → Planner → Research → Router → Writer
+       → Validator → SEO → Reviewer
+       → Publish
+```
+
+#### Phase 3: 模塊化平台 (📋 計劃中)
+```
+Task Queue → Supervisor → Agent Pool → Result Store
+                 ↓
+          Memory & Context
+                 ↓
+         Knowledge Base
+```
+
+#### Phase 4: 智能化平台 (📋 計劃中)
+```
+User Input → Intent Understanding → Task Decomposition
+                        ↓
+          Agent Orchestration → Dynamic Workflow
+                        ↓
+          Quality Assessment → Continuous Learning
+```
 
 詳細架構文檔請參閱 [`docs/architecture/`](docs/architecture/) 目錄。
 
@@ -50,7 +106,7 @@
 
 ### 第一層：基礎概念
 - [State](docs/chapters/02-State.md) - 狀態管理機制
-- [Dictionary](docs/chapters/03-Dictionary.md) - 在專案中雙向がる動的用語集
+- [Dictionary](docs/chapters/03-Dictionary.md) - 專案術語集
 - [Function](docs/chapters/04-Function.md) - 核心函數與工具
 - [Agent](docs/chapters/01-Agent.md) - AI 代理人基礎
 
@@ -61,11 +117,39 @@
 - [Validator](docs/chapters/08-Validator.md) - 資料驗證模組
 
 ### 第三層：進階主題
+- [Router](docs/architecture/Router.md) - 任務路由代理人
+- Supervisor - 代理人監督者
 - 工作流程自定義
 - 代理人擴展開發
 - 系統整合與部署
 
 更多教材內容請參閱 [`docs/chapters/`](docs/chapters/) 目錄。
+
+---
+
+## 📖 Learning Workflow
+
+每個章節都遵循相同的流程：
+
+```
+Chapter
+
+↓
+
+GitHub Implementation
+
+↓
+
+Markdown
+
+↓
+
+Architecture Review
+
+↓
+
+Git Commit
+```
 
 ---
 
@@ -84,12 +168,15 @@ ai-wordpress-factory/
 │   ├── research.py      # 調研代理人
 │   ├── writer.py        # 撰寫代理人
 │   ├── seo.py           # SEO 代理人
-│   └── reviewer.py      # 審閱代理人
+│   ├── reviewer.py      # 審閱代理人
+│   └── validator.py     # 驗證代理人
 │
 ├── tools/               # 外部工具模組
 │   ├── __init__.py      # 工具基類
 │   ├── search.py        # 搜索工具
 │   └── wordpress.py     # WordPress 發布工具
+│
+├── workflows/           # 工作流程定義
 │
 ├── docs/                # 文檔
 │   ├── architecture/    # 架構文檔
@@ -98,6 +185,7 @@ ai-wordpress-factory/
 │   │   ├── Agent.md
 │   │   ├── Contract.md
 │   │   └── Router.md
+│   │
 │   ├── chapters/        # 教材章節
 │   │   ├── 01-Agent.md
 │   │   ├── 02-State.md
@@ -107,8 +195,11 @@ ai-wordpress-factory/
 │   │   ├── 06-Research.md
 │   │   ├── 07-Writer.md
 │   │   └── 08-Validator.md
-│   └── glossary/        # 術語詞彙
-│       └── Glossary.md
+│   │
+│   ├── glossary/        # 術語詞彙
+│   │   └── Glossary.md
+│   │
+│   └── reviews/         # 代碼審閱紀錄
 │
 └── prompts/             # AI 指令文件
     ├── planner.md        # 規劃代理人提示
@@ -119,35 +210,40 @@ ai-wordpress-factory/
 
 ## 📊 Current Progress
 
-### ✅ 已完成
-- [x] 核心 AI 代理人開發（Planner, Research, Writer, SEO, Reviewer）
-- [x] WordPress REST API 整合
-- [x] 工作流程狀態管理.system
-- [x] 基本配置管理
-- [x] 教材文檔架構建立
-- [x] 架構文檔創建
-- [x] 術語詞彙集
+### Phase 1: 核心代理人開發 ✅
 
-### 🚧 進行中
-- [ ]進階工作流程自定義
-- [ ] 代理人智能協作機制
-- [ ] 系統效能填優化
-- [ ] 更多教材內容補充
+- ✅ [Agent](docs/chapters/01-Agent.md)
+- ✅ [State](docs/chapters/02-State.md)
+- ✅ [Dictionary](docs/chapters/03-Dictionary.md)
+- ✅ [Function](docs/chapters/04-Function.md)
+- ✅ [Planner](docs/chapters/05-Planner.md)
+- ✅ [Research](docs/chapters/06-Research.md)
+- ✅ [Writer](docs/chapters/07-Writer.md)
+- ✅ [Validator](docs/chapters/08-Validator.md)
+- 🚧 [Router](docs/architecture/Router.md)
+- ⏳ Supervisor
+- ⏳ Workflow
 
-### 📋 待完成
-- [ ] 更多 AI 模型支持
-- [ ] 多語言內容生成
-- [ ] 批次處理功能
-- [ ] 監控與日誌系統增強
+### Phase 2: 多代理人協作 🚧
+
+- 🚧 **Router 代理人實現** - 智能任務路由與分配
+- ⏳ **Supervisor 代理人開發** - 多代理人協作監督
+- 🚧 代理人狀態管理優化
+- 🚧 基本效能監控
 
 ---
 
-## 🔜 Next Chapter
+## 📅 Roadmap
 
-接下來將專注於：
-- **代理人智能協作**：優化多代理人之間的協作流程
-- **系統效能**：提升大規模內容生成的效率
-- **教材完善**：補充更多實用案例和最佳實踐
+詳細的發展路線和里程碑請參閱：
+- [ROADMAP.md](ROADMAP.md)
+
+---
+
+## 🎓 Current Context
+
+專案的學習上下文和當前狀態請參閱：
+- [COURSE_CONTEXT.md](COURSE_CONTEXT.md)
 
 ---
 
@@ -172,14 +268,14 @@ ai-wordpress-factory/
 1. Python 3.8 或更高版本
 2. pip (Python 包管理器)
 3. OpenAI API 鑰匙
-4. WordPress 網站 (支持 REST API)
+4. WordPress 網頁 (支持 REST API)
 5. (可選) Google Custom Search API 鑰匙
 
 ### 安裝步驟
 
 1. **克隆專案**
    ```bash
-   git clone https://github.com/you-repo/ai-wordpress-factory.git
+   git clone https://github.com/bence/ai-wordpress-factory.git
    cd ai-wordpress-factory
    ```
 
@@ -291,7 +387,7 @@ factory.save_state("workflow_state.json")
 - `AI_MAX_TOKENS`: AI 生成的最大 token 數 (默認: `2000`)
 
 ### WordPress 配置
-- `WORDPRESS_URL`: WordPress 網站 URL (必須)
+- `WORDPRESS_URL`: WordPress 網頁 URL (必須)
 - `WORDPRESS_USERNAME`: WordPress 用戶名 (必須)
 - `WORDPRESS_APP_PASSWORD`: WordPress 應用密碼 (必須)
 
@@ -324,6 +420,15 @@ factory.save_state("workflow_state.json")
 
 ### 🔄 ReviewerAgent (審閱代理人)
 - **功能**: 審閱和修改內容，確保質量、準確性、語法、流暢性和一致性
+
+### ✅ ValidatorAgent (驗證代理人)
+- **功能**: 驗證內容的結構和數據完整性
+
+### 🔀 Router (任務路由代理人) - 進行中
+- **功能**: 智能分配任務到合適的代理人
+
+### 👁️ Supervisor (代理人監督者) - 計劃中
+- **功能**: 協調多代理人協作，監督工作流程執行
 
 ---
 
@@ -382,7 +487,7 @@ def run_workflow(self, task_id: str) -> bool:
 2. **WordPress 發布失敗**
    - 確認 `WORDPRESS_URL` 配置正確
    - 確認用戶名和應用密碼正確
-   - 確認 WordPress 網站啟用了 REST API
+   - 確認 WordPress 網頁啟用了 REST API
    - 確認用戶有發布文章的權限
 
 3. **搜索功能失敗**
@@ -408,7 +513,7 @@ def run_workflow(self, task_id: str) -> bool:
 
 歡迎貢獻！你可以：
 
-1. **報告 Bug**: 在 Issue 區域提交 Bug 報告
+1. **報告 Bug**: 在 Issue 區域提交 Bug報告
 2. **提交功能請求**: 在 Issue 區域提交功能請求
 3. **提交 Pull Request**: 直接提交代碼修改
 
@@ -425,8 +530,9 @@ def run_workflow(self, task_id: str) -> bool:
 ## 📞 聯系方式
 
 如有任何問題或建議，請聯系：
-- Email: your-email@example.com
-- GitHub: [your-github-profile](https://github.com/your-username)
+- **GitHub**: [bence/ai-wordpress-factory](https://github.com/bence/ai-wordpress-factory)
+- **文檔**: [docs/](./docs/)
+- **課程上下文**: [COURSE_CONTEXT.md](./COURSE_CONTEXT.md)
 
 ---
 
