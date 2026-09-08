@@ -23,11 +23,12 @@ class WordPressPublisher(BaseTool):
             for key in required_keys
         )
 
-    def publish_content(self, task) -> Tuple[Optional[int], Optional[str]]:
+    def publish_content(self, task, featured_media_id: Optional[int] = None) -> Tuple[Optional[int], Optional[str]]:
         """發布內容到 WordPress。
         
         Args:
             task: 任務對象，包含要發布的內容和 SEO 元數據。
+            featured_media_id: 精選圖片媒體 ID（可選）。
         
         Returns:
             Tuple[Optional[int], Optional[str]]: 文章 ID 和文章 URL。
@@ -46,6 +47,10 @@ class WordPressPublisher(BaseTool):
             "comment_status": "open",
             "ping_status": "open",
         }
+        
+        # 設定精選圖片
+        if featured_media_id:
+            post_data["featured_media"] = featured_media_id
         
         # 添加 SEO 元數據
         if hasattr(task, "seo_description") and task.seo_description:
@@ -240,3 +245,57 @@ class WordPressPublisher(BaseTool):
         except Exception as e:
             self.log(f"列出文章失敗: {str(e)}", "error")
             return []
+
+    def upload_media(self, file_path: str, title: str = "") -> Tuple[Optional[int], Optional[str]]:
+        """上傳媒體檔案到 WordPress 媒體庫。
+
+        Args:
+            file_path: 本地檔案路徑或 URL。
+            title: 媒體標題（可選）。
+
+        Returns:
+            Tuple[Optional[int], Optional[str]]: 媒體 ID 和媒體 URL。
+        """
+        if not self.validate_config():
+            self.log("WordPress 配置無效，無法上傳媒體。", "error")
+            return None, None
+        
+        base_url = self.config.wordpress_url
+        username = self.config.wordpress_username
+        app_password = self.config.wordpress_app_password
+        api_url = urljoin(base_url, "wp-json/wp/v2/media")
+        
+        try:
+            if file_path.startswith("http://") or file_path.startswith("https://"):
+                file_response = requests.get(file_path, timeout=30)
+                file_response.raise_for_status()
+                file_data = file_response.content
+                filename = title or file_path.split("/")[-1] or "image.png"
+                content_type = file_response.headers.get("Content-Type", "application/octet-stream")
+            else:
+                with open(file_path, "rb") as f:
+                    file_data = f.read()
+                filename = title or file_path.split("/")[-1] or "image.png"
+                content_type = "application/octet-stream"
+            
+            headers = {
+                "Content-Disposition": f"attachment; filename={filename}",
+                "Content-Type": content_type,
+            }
+            
+            response = requests.post(
+                api_url,
+                auth=(username, app_password),
+                data=file_data,
+                headers=headers,
+                timeout=60,
+            )
+            response.raise_for_status()
+            media = response.json()
+            media_id = media.get("id")
+            media_url = media.get("source_url") or media.get("guid", {}).get("rendered")
+            self.log(f"媒體上傳成功: media_id={media_id}")
+            return media_id, media_url
+        except Exception as e:
+            self.log(f"媒體上傳失敗: {str(e)}", "error")
+            return None, None

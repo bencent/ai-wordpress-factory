@@ -12,8 +12,14 @@ class TaskStatus(Enum):
     PLANNING = auto()      # 規劃中
     RESEARCHING = auto()   # 調研中
     WRITING = auto()       # 撰寫中
+    CRITIQUING = auto()    # 自我批評中
+    REWRITING = auto()     # 修改中
     OPTIMIZING = auto()    # SEO 優化中
     REVIEWING = auto()     # 審閱中
+    ROUTING = auto()       # 路由決策中
+    MANUAL_REVIEW = auto() # 人工校稿中
+    LEARNING = auto()      # 學習更新中
+    GENERATING_IMAGE = auto()  # 圖片生成中
     PUBLISHING = auto()    # 發布中
     COMPLETED = auto()     # 已完成
     FAILED = auto()        # 失敗
@@ -44,13 +50,29 @@ class Task:
     plan: Optional[Dict[str, Any]] = None
     research_data: Optional[List[Dict[str, Any]]] = None
     draft_content: Optional[str] = None
+    critique_result: Optional[Dict[str, Any]] = None
+    revised_content: Optional[str] = None
     optimized_content: Optional[str] = None
     final_content: Optional[str] = None
+    
+    # Retry 保護
+    retry_count: int = 0
+    max_retries: int = 3
+    
+    # 圖片相關
+    image_prompt: Optional[str] = None
+    image_url: Optional[str] = None
+    hero_image_id: Optional[int] = None
+    hero_image_url: Optional[str] = None
+    image_status: Optional[str] = None
     
     # SEO 相關
     seo_title: Optional[str] = None
     seo_description: Optional[str] = None
     seo_keywords: Optional[List[str]] = None
+    
+    # 學習相關
+    learning_proposals: List[Dict[str, Any]] = field(default_factory=list)
     
     # 發布相關
     wordpress_id: Optional[int] = None
@@ -128,11 +150,21 @@ class WorkflowState:
                 plan=task_data.get("plan"),
                 research_data=task_data.get("research_data"),
                 draft_content=task_data.get("draft_content"),
+                critique_result=task_data.get("critique_result"),
+                revised_content=task_data.get("revised_content"),
                 optimized_content=task_data.get("optimized_content"),
                 final_content=task_data.get("final_content"),
+                retry_count=task_data.get("retry_count", 0),
+                max_retries=task_data.get("max_retries", 3),
+                image_prompt=task_data.get("image_prompt"),
+                image_url=task_data.get("image_url"),
+                hero_image_id=task_data.get("hero_image_id"),
+                hero_image_url=task_data.get("hero_image_url"),
+                image_status=task_data.get("image_status"),
                 seo_title=task_data.get("seo_title"),
                 seo_description=task_data.get("seo_description"),
                 seo_keywords=task_data.get("seo_keywords"),
+                learning_proposals=task_data.get("learning_proposals", []),
                 wordpress_id=task_data.get("wordpress_id"),
                 wordpress_url=task_data.get("wordpress_url"),
             )

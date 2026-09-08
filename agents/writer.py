@@ -1,6 +1,7 @@
 # AI WordPress Factory 撰寫代理人
 # 负責根據計劃和資料撰寫內容
 
+import json
 from typing import Optional, Dict, Any
 from state import Task
 from . import BaseAgent
@@ -39,6 +40,12 @@ class WriterAgent(BaseAgent):
             研究數據:
             {research_data}
             
+            風格規則:
+            {style_rules}
+            
+            語氣樣本:
+            {tone_sample}
+            
             請遵循以下要求：
             1. 使用適當的標題層次（H1, H2, H3等）
             2. 內容應結構清晰，邏輯嚴謹
@@ -46,6 +53,8 @@ class WriterAgent(BaseAgent):
             4. 使用簡潔明了的語言
             5. 如果是博客文章，字數應在800-1500字之間
             6. 使用繁體中文撰寫
+            7. 嚴格遵守風格規則中的所有禁止事項
+            8. 參考語氣樣本的寫作風格
             
             請返回完整的文章內容。
             """
@@ -57,6 +66,9 @@ class WriterAgent(BaseAgent):
              for item in (task.research_data or [])]
         ) or "無"
         
+        style_rules = self._load_file("prompts/style-rules.md")
+        tone_sample = self._load_file("prompts/tone-sample.md")
+        
         # 替換提示中的變量
         prompt = prompt_template.format(
             title=task.title,
@@ -64,6 +76,8 @@ class WriterAgent(BaseAgent):
             content_type=task.content_type.name,
             plan=plan_str,
             research_data=research_data_str,
+            style_rules=style_rules,
+            tone_sample=tone_sample,
         )
         
         # 调用 AI 撰寫內容
@@ -74,6 +88,21 @@ class WriterAgent(BaseAgent):
         )
         
         return content
+    
+    def _load_file(self, file_path: str) -> str:
+        """讀取文件內容。
+
+        Args:
+            file_path: 文件路徑。
+
+        Returns:
+            str: 文件內容。
+        """
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                return f.read()
+        except FileNotFoundError:
+            return ""
 
     def refine_content(self, task: Task, feedback: str) -> str:
         """根據反饋 Fine-tune 內容。
@@ -108,5 +137,4 @@ class WriterAgent(BaseAgent):
         return refined_content
 
 
-# 輔助函數：導入 json 模組
-import json
+# 輔助函數：已移至檔案頂部

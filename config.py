@@ -27,6 +27,10 @@ class Config:
     ai_temperature: float = 0.7
     ai_max_tokens: int = 2000
     
+    # 工作流程配置
+    max_retries: int = 3
+    image_required: bool = False
+    
     # 代理人配置
     agents: dict = None
     
@@ -46,8 +50,12 @@ class Config:
                 "planner": {"enabled": True},
                 "research": {"enabled": True},
                 "writer": {"enabled": True},
+                "critic": {"enabled": True},
                 "seo": {"enabled": True},
                 "reviewer": {"enabled": True},
+                "router": {"enabled": True},
+                "image": {"enabled": True},
+                "learner": {"enabled": True},
             }
 
 
@@ -90,5 +98,7 @@ def load_config_from_file(file_path: str = "config.json") -> Config:
         ai_model=data.get("ai_model", "gpt-4"),
         ai_temperature=data.get("ai_temperature", 0.7),
         ai_max_tokens=data.get("ai_max_tokens", 2000),
+        max_retries=data.get("max_retries", 3),
+        image_required=data.get("image_required", False),
         agents=data.get("agents"),
     )

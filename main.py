@@ -16,6 +16,7 @@ from state import (
     ContentType,
     WorkflowState,
 )
+from contracts import ReviewResult, ReviewAction, CritiqueResult, CritiqueAction
 
 # 配置日誌
 logging.basicConfig(
@@ -77,74 +78,187 @@ class AIWordPressFactory:
     def run_workflow(self, task_id: str) -> bool:
         """執行工作流程。
         
+        Production Workflow:
+        Task -> Planner -> Research -> Writer -> Critic -> SEO -> Reviewer -> Router
+            -> ImageAgent -> Publisher -> COMPLETED -> Human Review -> Learner
+        
         Args:
             task_id: 任務 ID。
         
         Returns:
             bool: 工作流程是否成功完成。
         """
-        from agents.planner import PlannerAgent
-        from agents.research import ResearchAgent
-        from agents.writer import WriterAgent
-        from agents.seo import SEOAgent
-        from agents.reviewer import ReviewerAgent
-        from tools.wordpress import WordPressPublisher
-        
         task = workflow_state.get_task(task_id)
         if not task:
             logger.error(f"任務不存在: {task_id}")
             return False
         
         try:
-            # 1. 規劃階段
+            # Step 1: 規劃階段
             workflow_state.update_task_status(task_id, TaskStatus.PLANNING)
-            planner = PlannerAgent(config)
-            plan = planner.create_plan(task)
-            task.plan = plan
-            logger.info(f"任務 {task_id} 規劃完成")
+            planner = self._get_agent("planner")
+            if planner:
+                plan = planner.create_plan(task)
+                task.plan = plan
+                logger.info(f"任務 {task_id} 規劃完成")
             
-            # 2. 調研階段
+            # Step 2: 調研階段
             workflow_state.update_task_status(task_id, TaskStatus.RESEARCHING)
-            research_agent = ResearchAgent(config)
-            research_data = research_agent.gather_research(task)
-            task.research_data = research_data
-            logger.info(f"任務 {task_id} 調研完成")
+            research_agent = self._get_agent("research")
+            if research_agent:
+                research_data = research_agent.gather_research(task)
+                task.research_data = research_data
+                logger.info(f"任務 {task_id} 調研完成")
             
-            # 3. 撰寫階段
+            # Step 3: 撰寫階段
             workflow_state.update_task_status(task_id, TaskStatus.WRITING)
-            writer = WriterAgent(config)
+            writer = self._get_agent("writer")
+            if not writer:
+                logger.error("WriterAgent 未配置")
+                return False
             draft_content = writer.write_content(task)
             task.draft_content = draft_content
             logger.info(f"任務 {task_id} 撰寫完成")
             
-            # 4. SEO 優化階段
+            # Step 4: Self-Critique 階段
+            workflow_state.update_task_status(task_id, TaskStatus.CRITIQUING)
+            critic = self._get_agent("critic")
+            if critic:
+                critique_result = critic.critique(task, draft_content)
+                task.critique_result = asdict(critique_result)
+                logger.info(f"任務 {task_id} 自我批評完成，分數: {critique_result.score}")
+                
+                if critique_result.delete or critique_result.rewrite or critique_result.research_more:
+                    workflow_state.update_task_status(task_id, TaskStatus.REWRITING)
+                    revised_content = self._apply_critique(task, draft_content, critique_result)
+                    task.revised_content = revised_content
+                    logger.info(f"任務 {task_id} 根據批評修改完成")
+                else:
+                    task.revised_content = draft_content
+                    logger.info(f"任務 {task_id} 無需修改")
+            else:
+                task.revised_content = draft_content
+            
+            # Step 5: SEO 優化階段
             workflow_state.update_task_status(task_id, TaskStatus.OPTIMIZING)
-            seo_agent = SEOAgent(config)
-            optimized_content, seo_metadata = seo_agent.optimize_content(task)
-            task.optimized_content = optimized_content
-            task.seo_title = seo_metadata.get("title")
-            task.seo_description = seo_metadata.get("description")
-            task.seo_keywords = seo_metadata.get("keywords")
-            logger.info(f"任務 {task_id} SEO 優化完成")
+            seo_agent = self._get_agent("seo")
+            if seo_agent:
+                optimized_content, seo_metadata = seo_agent.optimize_content(task)
+                task.optimized_content = optimized_content
+                task.seo_title = seo_metadata.get("title")
+                task.seo_description = seo_metadata.get("description")
+                task.seo_keywords = seo_metadata.get("keywords")
+                logger.info(f"任務 {task_id} SEO 優化完成")
             
-            # 5. 審閱階段
-            workflow_state.update_task_status(task_id, TaskStatus.REVIEWING)
-            reviewer = ReviewerAgent(config)
-            final_content = reviewer.review_content(task)
-            task.final_content = final_content
-            logger.info(f"任務 {task_id} 審閱完成")
+            # Step 6: Review 階段（可能進入 retry loop）
+            review_passed = False
+            review_result = None
             
-            # 6. 發布階段
+            while task.retry_count < task.max_retries:
+                workflow_state.update_task_status(task_id, TaskStatus.REVIEWING)
+                reviewer = self._get_agent("reviewer")
+                if reviewer:
+                    review_result = reviewer.review_content(task)
+                    task.final_content = reviewer._final_review(
+                        task.revised_content or task.optimized_content or task.draft_content or "",
+                        task
+                    )
+                
+                if review_result and review_result.passed:
+                    review_passed = True
+                    logger.info(f"任務 {task_id} 審閱通過，分數: {review_result.score}")
+                    break
+                
+                task.retry_count += 1
+                logger.warning(f"任務 {task_id} 審閱未通過，重試次數: {task.retry_count}/{task.max_retries}")
+                
+                if task.retry_count >= task.max_retries:
+                    logger.error(f"任務 {task_id} 超過最大重試次數")
+                    workflow_state.update_task_status(task_id, TaskStatus.FAILED, error_message="超過最大重試次數")
+                    return False
+                
+                # Router 決策
+                workflow_state.update_task_status(task_id, TaskStatus.ROUTING)
+                router = self._get_agent("router")
+                if router:
+                    action = router.decide(review_result, task)
+                    logger.info(f"任務 {task_id} Router 決策: {action}")
+                    
+                    if action == "rewrite":
+                        task.draft_content = self._rewrite_content(task, review_result)
+                        task.retry_count += 1
+                        continue
+                    elif action == "research":
+                        workflow_state.update_task_status(task_id, TaskStatus.RESEARCHING)
+                        research_agent = self._get_agent("research")
+                        if research_agent:
+                            task.research_data = research_agent.gather_research(task)
+                        task.draft_content = self._rewrite_content(task, review_result)
+                        task.retry_count += 1
+                        continue
+                    elif action == "seo":
+                        workflow_state.update_task_status(task_id, TaskStatus.OPTIMIZING)
+                        seo_agent = self._get_agent("seo")
+                        if seo_agent:
+                            optimized_content, _ = seo_agent.optimize_content(task)
+                            task.optimized_content = optimized_content
+                        task.retry_count += 1
+                        continue
+                    else:
+                        break
+            
+            if not review_passed:
+                return False
+            
+            # Step 7: 人工校稿檢查點
+            workflow_state.update_task_status(task_id, TaskStatus.MANUAL_REVIEW)
+            self._manual_review_checkpoint(task)
+            
+            # Step 8: 圖片生成階段
+            workflow_state.update_task_status(task_id, TaskStatus.GENERATING_IMAGE)
+            image_agent = self._get_agent("image")
+            if image_agent and getattr(config, "agents", {}).get("image", {}).get("enabled", True):
+                try:
+                    media_id, media_url = image_agent.generate_hero_image(task)
+                    task.hero_image_id = media_id
+                    task.hero_image_url = media_url
+                    task.image_status = "success" if media_id else "failed"
+                    if media_id:
+                        logger.info(f"任務 {task_id} 圖片生成完成: {media_url}")
+                    else:
+                        logger.warning(f"任務 {task_id} 圖片生成失敗，將繼續發布（無精選圖片）")
+                except Exception as e:
+                    logger.warning(f"任務 {task_id} 圖片生成異常: {str(e)}")
+                    task.image_status = "failed"
+            else:
+                logger.info(f"任務 {task_id} 圖片生成已禁用，跳過")
+            
+            # Step 9: 發布階段
             workflow_state.update_task_status(task_id, TaskStatus.PUBLISHING)
-            publisher = WordPressPublisher(config)
-            wordpress_id, wordpress_url = publisher.publish_content(task)
-            task.wordpress_id = wordpress_id
-            task.wordpress_url = wordpress_url
-            logger.info(f"任務 {task_id} 發布完成: {wordpress_url}")
+            publisher = self._get_agent("publisher")
+            if publisher:
+                featured_media_id = task.hero_image_id if task.image_status == "success" else None
+                wordpress_id, wordpress_url = publisher.publish_content(task, featured_media_id=featured_media_id)
+                task.wordpress_id = wordpress_id
+                task.wordpress_url = wordpress_url
+                logger.info(f"任務 {task_id} 發布完成: {wordpress_url}")
             
-            # 7. 完成
+            # Step 10: 完成
             workflow_state.update_task_status(task_id, TaskStatus.COMPLETED)
             logger.info(f"任務 {task_id} 已完成")
+            
+            # Step 11: 學習更新（發布後執行）
+            workflow_state.update_task_status(task_id, TaskStatus.LEARNING)
+            learner = self._get_agent("learner")
+            if learner:
+                learning_result = learner.analyze_review(task)
+                proposals = learning_result.get("學習提案", [])
+                if proposals:
+                    task.learning_proposals.extend(proposals)
+                    logger.info(f"任務 {task_id} 學習完成：產生 {len(proposals)} 個學習提案")
+                else:
+                    logger.info(f"任務 {task_id} 學習完成：無需更新規則庫")
+            
             return True
             
         except Exception as e:
@@ -155,6 +269,162 @@ class AIWordPressFactory:
                 error_message=str(e)
             )
             return False
+
+    def _get_agent(self, agent_type: str):
+        """根據類型獲取代理人實例。
+
+        Args:
+            agent_type: 代理人類型。
+
+        Returns:
+            代理人實例或 None。
+        """
+        from agents.planner import PlannerAgent
+        from agents.research import ResearchAgent
+        from agents.writer import WriterAgent
+        from agents.critic import CriticAgent
+        from agents.seo import SEOAgent
+        from agents.reviewer import ReviewerAgent
+        from agents.router import Router
+        from agents.image import ImageAgent
+        from agents.learner import LearnerAgent
+        from tools.wordpress import WordPressPublisher
+        
+        agents = {
+            "planner": PlannerAgent,
+            "research": ResearchAgent,
+            "writer": WriterAgent,
+            "critic": CriticAgent,
+            "seo": SEOAgent,
+            "reviewer": ReviewerAgent,
+            "router": Router,
+            "image": ImageAgent,
+            "learner": LearnerAgent,
+            "publisher": WordPressPublisher,
+        }
+        
+        agent_class = agents.get(agent_type)
+        if not agent_class:
+            return None
+        
+        enabled = getattr(config, "agents", {}).get(agent_type, {}).get("enabled", True)
+        if not enabled:
+            return None
+        
+        return agent_class(config)
+
+    def _apply_critique(self, task: Task, content: str, critique: CritiqueResult) -> str:
+        """根據批評結果修改內容。
+
+        Args:
+            task: 任務對象。
+            content: 原始內容。
+            critique: 批評結果。
+
+        Returns:
+            str: 修改後的內容。
+        """
+        writer = self._get_agent("writer")
+        if not writer:
+            return content
+        
+        prompt = f"""
+        你是一位專業的內容編輯。請根據以下自我批評結果修改文章：
+
+        原始文章:
+        {content}
+
+        批評結果:
+        - 分數: {critique.score}
+        - 問題: {critique.issues}
+        - AI 模式: {critique.ai_patterns}
+        - 建議保留: {critique.keep}
+        - 建議修改: {critique.rewrite}
+        - 建議刪除: {critique.delete}
+        - 需要更多資料: {critique.research_more}
+        - 整體評價: {critique.overall_feedback}
+
+        修改原則：
+        1. 不要為了符合 Critique 而增加更多文字
+        2. 如果某段不需要，直接刪除
+        3. 如果原本觀點站不住腳，重新論證
+        4. 如果沒有證據，不要假裝有證據
+        5. 如果內容過度模式化，改變文章組織方式，而不只是換詞
+
+        請返回修改後的完整文章。
+        """
+        
+        revised = writer.call_ai(prompt, temperature=0.7, max_tokens=4000)
+        return revised.strip()
+
+    def _rewrite_content(self, task: Task, review_result: ReviewResult) -> str:
+        """根據審閱結果重寫內容。
+
+        Args:
+            task: 任務對象。
+            review_result: 審閱結果。
+
+        Returns:
+            str: 重寫後的內容。
+        """
+        writer = self._get_agent("writer")
+        if not writer:
+            return task.draft_content or ""
+        
+        content = task.revised_content or task.optimized_content or task.draft_content or ""
+        
+        prompt = f"""
+        你是一位專業的內容編輯。請根據以下審閱結果重寫文章：
+
+        原始文章:
+        {content}
+
+        審閱反饋:
+        {review_result.feedback}
+
+        請返回重寫後的完整文章。
+        """
+        
+        rewritten = writer.call_ai(prompt, temperature=0.7, max_tokens=4000)
+        return rewritten.strip()
+
+    def _manual_review_checkpoint(self, task: Task) -> None:
+        """人工校稿檢查點。暫停工作流程，等待人類審閱和修正。
+
+        Args:
+            task: 任務對象。
+        """
+        content = task.final_content or task.revised_content or task.optimized_content or task.draft_content or ""
+        
+        print("\n" + "=" * 60)
+        print(f"人工校稿檢查點：任務「{task.title}」")
+        print("=" * 60)
+        print("\n【AI 草稿內容】\n")
+        print(content[:2000] + ("..." if len(content) > 2000 else ""))
+        print("\n" + "=" * 60)
+        print("請審閱以上內容。")
+        print("- 直接貼上修正後的完整內容")
+        print("- 或輸入 '.' 表示接受原稿")
+        print("- 或輸入 'skip' 跳過校稿（不建議）")
+        print("=" * 60)
+        
+        try:
+            user_input = input("\n請輸入修正內容: ").strip()
+        except EOFError:
+            logger.warning("無法讀取使用者輸入，使用 AI 草稿")
+            return
+        
+        if user_input == ".":
+            logger.info("使用者接受原稿")
+            return
+        
+        if user_input.lower() == "skip":
+            logger.warning("使用者跳過校稿")
+            return
+        
+        if user_input:
+            task.final_content = user_input
+            logger.info("使用者提供了修正內容")
 
     def save_state(self, file_path: str = "workflow_state.json") -> None:
         """保存工作流程狀態到文件。

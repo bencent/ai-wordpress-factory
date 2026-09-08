@@ -62,8 +62,82 @@
 - **Agent**: AI 代理人模組
 - **Workflow**: 工作流程協調
 - **Contract**: 代理人合約定義
+- **Critic**: 自我批評代理人
 - **Router**: 任務路由與分配
-- **Supervisor**: 代理人監督與協調
+
+### 核心流程
+
+```
+Task
+ ↓
+Planner
+ ↓
+Research
+ ↓
+Writer
+ ↓
+Critic（自我批評 + AI Pattern Detection）
+ ↓
+SEO
+ ↓
+Reviewer（結構化 ReviewResult）
+ ↓
+Router（決策：Publish / Rewrite / Research / SEO / Fail）
+ ↓
+ImageAgent
+ ↓
+Publisher
+ ↓
+COMPLETED
+ ↓
+Human Review
+ ↓
+LearnerAgent（LearningProposal）
+```
+
+### 責任分離原則
+
+```text
+WriterAgent
+=
+Generate Content
+
+Self-Critique
+=
+Question Own Content
+
+Challenge / Debate
+=
+Challenge Assumptions and Patterns
+
+ReviewerAgent
+=
+Evaluate Quality
+
+Router
+=
+Decide Next Step
+
+Workflow
+=
+Execute Workflow
+
+ImageAgent
+=
+Generate Hero Image + Upload Media
+
+LearnerAgent
+=
+Learn from Human Edits
+
+Task
+=
+Shared Context
+
+Skill / Experience
+=
+Reusable Learning
+```
 
 ### 架構演進路線
 
@@ -72,21 +146,22 @@
 Task → Planner → Research → Writer → SEO → Reviewer → Publish
 ```
 
-#### Phase 2: 多代理人協作 (🚧 進行中)
+#### Phase 2: Self-Critique + Anti-AI Patterns (🚧 進行中)
 ```
-Task → Supervisor
-       → Planner → Research → Router → Writer
-       → Validator → SEO → Reviewer
-       → Publish
+Task → Planner → Research → Writer → Critic → SEO → Reviewer → Router → Publish
 ```
 
-#### Phase 3: 模塊化平台 (📋 計劃中)
+Critic 新增：
+- 自我批評（Self-Doubt Questions）
+- AI Pattern Detection（假真誠、過度誇大、制式結尾等）
+- 結構化 CritiqueResult（KEEP / REWRITE / DELETE / RESEARCH_MORE）
+
+#### Phase 3: Retry Loop + Learning (🚧 進行中)
 ```
-Task Queue → Supervisor → Agent Pool → Result Store
-                 ↓
-          Memory & Context
-                 ↓
-         Knowledge Base
+Reviewer FAIL → Router → Rewrite/Research/SEO → Reviewer (max_retries = 3)
+```
+```
+Human Edit → LearnerAgent → LearningProposal (pending) → Approved → Skill
 ```
 
 #### Phase 4: 智能化平台 (📋 計劃中)
@@ -127,6 +202,58 @@ User Input → Intent Understanding → Task Decomposition
 
 ---
 
+## 🧠 Self-Updating Loop（自我更新迴圈）
+
+本專案採用 **Production Workflow + Self-Critique + Anti-AI Patterns**：
+
+```
+Phase 1: Generate
+Task → Planner → Research → Writer（載入 style-rules + tone-sample + anti-ai-writing）
+    ↓
+Phase 2: Self-Critique
+Writer → Draft V1 → Critic → CritiqueResult（score / issues / ai_patterns）
+    ↓
+Phase 3: Revise
+CritiqueResult → Writer → Draft V2（如需修改）
+    ↓
+Phase 4: SEO + Review
+Draft V2 → SEO → Reviewer → ReviewResult（passed / score / suggested_action）
+    ↓
+Phase 5: Router + Retry
+ReviewResult → Router → Publish / Rewrite / Research / SEO / Fail（max_retries = 3）
+    ↓
+Phase 6: Image
+Reviewer PASS → ImageAgent → DALL-E → WordPress Media
+    ↓
+Phase 7: Publish
+Publisher → WordPress
+    ↓
+Phase 8: Human Review
+人工校稿檢查點
+    ↓
+Phase 9: Learning
+Human Edit → LearnerAgent → LearningProposal（pending）→ Approved → Skill
+```
+
+每次人工修正都會被 LearnerAgent 分析，提取可重複應用的規律，並產生 LearningProposal。
+Proposal 必須經過人工審核後才能更新到 constitution（style-rules.md / anti-ai-writing.md）。
+
+### Anti-AI Writing Patterns
+
+系統內建 AI 寫作模式偵測，CriticAgent 與 ReviewerAgent 都會檢查：
+
+- **Fake Sincerity**: 假真誠（老實說、說真的、坦白說）
+- **Overstatement**: 過度誇大（革命性的、劃時代的）
+- **AI Translation Vocab**: AI 翻譯詞（深入探索、格局、見證、賦能）
+- **Fake Depth**: 假深度（不僅是 X，更是 Y）
+- **Artificial Scope**: 虛假範圍（從 X 到 Y，跨度不真實）
+- **Rule of Three**: 強制三項並列
+- **Formulaic Ending**: 制式結尾（總結來說、未來展望）
+- **Over-Structured**: 過度結構化（強制 Introduction / Part 1 / Conclusion）
+- **Excessive Signposting**: 過度導讀（以下是詳細分析）
+
+---
+
 ## 📖 Learning Workflow
 
 每個章節都遵循相同的流程：
@@ -155,11 +282,14 @@ Git Commit
 
 ## 📁 Folder Structure
 
+## 📁 Folder Structure
+
 ```
 ai-wordpress-factory/
 ├── main.py              # 系統入口，協調工作流程
 ├── config.py            # 全局配置管理
 ├── state.py             # 工作流程狀態管理
+├── contracts.py         # 結構化合約定義（CritiqueResult / ReviewResult / LearningProposal）
 ├── requirements.txt     # Python 依賴包
 │
 ├── agents/              # AI 代理人模組
@@ -167,14 +297,29 @@ ai-wordpress-factory/
 │   ├── planner.py       # 規劃代理人
 │   ├── research.py      # 調研代理人
 │   ├── writer.py        # 撰寫代理人
+│   ├── critic.py        # 批判代理人（Self-Critique + AI Pattern Detection）
 │   ├── seo.py           # SEO 代理人
-│   ├── reviewer.py      # 審閱代理人
+│   ├── reviewer.py      # 審閱代理人（結構化 ReviewResult）
+│   ├── router.py        # 路由代理人（決策層）
+│   ├── image.py         # 圖片生成代理人
+│   ├── learner.py       # 學習代理人（LearningProposal）
 │   └── validator.py     # 驗證代理人
 │
 ├── tools/               # 外部工具模組
 │   ├── __init__.py      # 工具基類
 │   ├── search.py        # 搜索工具
 │   └── wordpress.py     # WordPress 發布工具
+│
+├── prompts/             # AI 指令文件
+│   ├── planner.md       # 規劃代理人提示
+│   ├── writer.md        # 撰寫代理人提示
+│   ├── critic.md        # 批判代理人提示
+│   ├── router.md        # 路由代理人提示
+│   ├── image.md         # 圖片代理人提示
+│   ├── learner.md       # 學習代理人提示
+│   ├── style-rules.md   # 風格規則（禁止句與基本文體）
+│   ├── tone-sample.md   # 語氣樣本參考
+│   └── anti-ai-writing.md  # AI 寫作模式偵測規則
 │
 ├── workflows/           # 工作流程定義
 │
@@ -194,7 +339,8 @@ ai-wordpress-factory/
 │   │   ├── 05-Planner.md
 │   │   ├── 06-Research.md
 │   │   ├── 07-Writer.md
-│   │   └── 08-Validator.md
+│   │   ├── 08-Validator.md
+│   │   └── 09-Reading-GitHub.md
 │   │
 │   ├── glossary/        # 術語詞彙
 │   │   └── Glossary.md
@@ -203,7 +349,14 @@ ai-wordpress-factory/
 │
 └── prompts/             # AI 指令文件
     ├── planner.md        # 規劃代理人提示
-    └── writer.md         # 撰寫代理人提示
+    ├── writer.md         # 撰寫代理人提示
+    ├── critic.md         # 批判代理人提示
+    ├── router.md         # 路由代理人提示
+    ├── image.md          # 圖片代理人提示
+    ├── learner.md        # 學習代理人提示
+    ├── style-rules.md    # 風格規則（禁止句與基本文體）
+    ├── tone-sample.md    # 語氣樣本參考
+    └── anti-ai-writing.md  # AI 寫作模式偵測規則
 ```
 
 ---
@@ -412,20 +565,38 @@ factory.save_state("workflow_state.json")
 - **依賴**: 可選的搜索 API
 
 ### ✍️ WriterAgent (撰寫代理人)
-- **功能**: 根據計劃和資料撰寫高質量的文章內容
+- **功能**: 根據計劃和資料撰寫高質量的文章內容，載入風格規則與語氣樣本
 - **提示文件**: [`prompts/writer.md`](prompts/writer.md:1)
 
 ### 🎯 SEOAgent (SEO 代理人)
 - **功能**: 优化内容的 SEO 屬性，包括標題、描述、關鍵字等
 
+### 🧐 CriticAgent (批判代理人)
+- **功能**: 自我批評、偵測 AI 寫作模式、挑戰內容的假設與品質
+- **提示文件**: [`prompts/critic.md`](prompts/critic.md:1)
+- **輸出**: 結構化 CritiqueResult（score / issues / ai_patterns / keep / rewrite / delete / research_more）
+- **核心原則**: First draft is a hypothesis, not the final answer.
+
 ### 🔄 ReviewerAgent (審閱代理人)
-- **功能**: 審閱和修改內容，確保質量、準確性、語法、流暢性和一致性
+- **功能**: 審閱和修改內容，確保質量、準確性、語法、流暢性和一致性，並進行最終風格規則審核
+- **輸出**: 結構化 ReviewResult（passed / score / issues / feedback / suggested_action）
+
+### 🔀 Router (路由代理人)
+- **功能**: 根據 ReviewResult 決定下一步行動（Publish / Rewrite / Research / SEO / Fail）
+- **提示文件**: [`prompts/router.md`](prompts/router.md:1)
+
+### 🖼️ ImageAgent (圖片代理人)
+- **功能**: 根據文章內容生成 hero banner 圖片，上傳 WordPress 並設為精選圖片
+- **提示文件**: [`prompts/image.md`](prompts/image.md:1)
+- **依賴**: OpenAI DALL-E API
+
+### 🧠 LearnerAgent (學習代理人)
+- **功能**: 分析人工校稿的修改，提取規律並產生 LearningProposal
+- **提示文件**: [`prompts/learner.md`](prompts/learner.md:1)
+- **機制**: 提案制（pending → approved → rejected），不直接修改 constitution
 
 ### ✅ ValidatorAgent (驗證代理人)
 - **功能**: 驗證內容的結構和數據完整性
-
-### 🔀 Router (任務路由代理人) - 進行中
-- **功能**: 智能分配任務到合適的代理人
 
 ### 👁️ Supervisor (代理人監督者) - 計劃中
 - **功能**: 協調多代理人協作，監督工作流程執行
