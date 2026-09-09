@@ -86,6 +86,85 @@ class Task:
         if self.updated_at is None:
             self.updated_at = self.created_at
 
+    def to_dict(self) -> Dict[str, Any]:
+        """將任務轉換為字典（用於序列化）。"""
+        return {
+            "id": self.id,
+            "title": self.title,
+            "description": self.description,
+            "content_type": self.content_type.name if isinstance(self.content_type, ContentType) else self.content_type,
+            "status": self.status.name if isinstance(self.status, TaskStatus) else self.status,
+            "priority": self.priority,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "completed_at": self.completed_at,
+            "error_message": self.error_message,
+            "plan": self.plan,
+            "research_data": self.research_data,
+            "draft_content": self.draft_content,
+            "critique_result": self.critique_result,
+            "revised_content": self.revised_content,
+            "optimized_content": self.optimized_content,
+            "final_content": self.final_content,
+            "retry_count": self.retry_count,
+            "max_retries": self.max_retries,
+            "image_prompt": self.image_prompt,
+            "image_url": self.image_url,
+            "hero_image_id": self.hero_image_id,
+            "hero_image_url": self.hero_image_url,
+            "image_status": self.image_status,
+            "seo_title": self.seo_title,
+            "seo_description": self.seo_description,
+            "seo_keywords": self.seo_keywords,
+            "learning_proposals": self.learning_proposals,
+            "wordpress_id": self.wordpress_id,
+            "wordpress_url": self.wordpress_url,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "Task":
+        """從字典創建 Task 實例（用於反序列化）。"""
+        content_type = data.get("content_type", "BLOG_POST")
+        if isinstance(content_type, str):
+            content_type = ContentType[content_type]
+
+        status = data.get("status", "PENDING")
+        if isinstance(status, str):
+            status = TaskStatus[status]
+
+        return cls(
+            id=data["id"],
+            title=data["title"],
+            description=data.get("description"),
+            content_type=content_type,
+            status=status,
+            priority=data.get("priority", 0),
+            created_at=data.get("created_at"),
+            updated_at=data.get("updated_at"),
+            completed_at=data.get("completed_at"),
+            error_message=data.get("error_message"),
+            plan=data.get("plan"),
+            research_data=data.get("research_data"),
+            draft_content=data.get("draft_content"),
+            critique_result=data.get("critique_result"),
+            revised_content=data.get("revised_content"),
+            optimized_content=data.get("optimized_content"),
+            final_content=data.get("final_content"),
+            retry_count=data.get("retry_count", 0),
+            max_retries=data.get("max_retries", 3),
+            image_prompt=data.get("image_prompt"),
+            image_url=data.get("image_url"),
+            hero_image_id=data.get("hero_image_id"),
+            hero_image_url=data.get("hero_image_url"),
+            image_status=data.get("image_status"),
+            seo_title=data.get("seo_title"),
+            seo_description=data.get("seo_description"),
+            seo_keywords=data.get("seo_keywords"),
+            learning_proposals=data.get("learning_proposals", []),
+            wordpress_id=data.get("wordpress_id"),
+            wordpress_url=data.get("wordpress_url"),
+        )
+
 
 @dataclass
 class WorkflowState:
@@ -123,7 +202,7 @@ class WorkflowState:
     def to_dict(self) -> Dict[str, Any]:
         """將狀態轉換為字典（用於序列化）。"""
         return {
-            "tasks": {task_id: task.__dict__ for task_id, task in self.tasks.items()},
+            "tasks": {task_id: task.to_dict() for task_id, task in self.tasks.items()},
             "current_task_id": self.current_task_id,
             "global_state": self.global_state,
         }
@@ -136,38 +215,7 @@ class WorkflowState:
         state.global_state = data.get("global_state", {})
         
         for task_id, task_data in data.get("tasks", {}).items():
-            task = Task(
-                id=task_data["id"],
-                title=task_data["title"],
-                description=task_data.get("description"),
-                content_type=ContentType[task_data.get("content_type", "BLOG_POST")],
-                status=TaskStatus[task_data.get("status", "PENDING")],
-                priority=task_data.get("priority", 0),
-                created_at=task_data.get("created_at"),
-                updated_at=task_data.get("updated_at"),
-                completed_at=task_data.get("completed_at"),
-                error_message=task_data.get("error_message"),
-                plan=task_data.get("plan"),
-                research_data=task_data.get("research_data"),
-                draft_content=task_data.get("draft_content"),
-                critique_result=task_data.get("critique_result"),
-                revised_content=task_data.get("revised_content"),
-                optimized_content=task_data.get("optimized_content"),
-                final_content=task_data.get("final_content"),
-                retry_count=task_data.get("retry_count", 0),
-                max_retries=task_data.get("max_retries", 3),
-                image_prompt=task_data.get("image_prompt"),
-                image_url=task_data.get("image_url"),
-                hero_image_id=task_data.get("hero_image_id"),
-                hero_image_url=task_data.get("hero_image_url"),
-                image_status=task_data.get("image_status"),
-                seo_title=task_data.get("seo_title"),
-                seo_description=task_data.get("seo_description"),
-                seo_keywords=task_data.get("seo_keywords"),
-                learning_proposals=task_data.get("learning_proposals", []),
-                wordpress_id=task_data.get("wordpress_id"),
-                wordpress_url=task_data.get("wordpress_url"),
-            )
+            task = Task.from_dict(task_data)
             state.tasks[task_id] = task
         
         return state

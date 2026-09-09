@@ -41,8 +41,13 @@ class SEOAgent(BaseAgent):
         """
         content = task.optimized_content or task.draft_content or ""
         
-        # 使用 AI 進行內容優化
-        prompt = f"""
+        plan_str = json.dumps(task.plan, ensure_ascii=False, indent=2) if task.plan else "無"
+        research_data_str = "\n".join(
+            [f"- {item['標題']}: {item['內容']}" 
+             for item in (task.research_data or [])]
+        ) or "無"
+        
+        prompt = """
         你是一位 SEO 專家。請優化以下文章的內容，以提高其搜索引擎友好性：
         
         文章標題: {title}
@@ -66,12 +71,6 @@ class SEOAgent(BaseAgent):
         返回優化後的完整文章內容。
         """
         
-        plan_str = json.dumps(task.plan, ensure_ascii=False, indent=2) if task.plan else "無"
-        research_data_str = "\n".join(
-            [f"- {item['標題']}: {item['內容']}" 
-             for item in (task.research_data or [])]
-        ) or "無"
-        
         optimized_content = self.call_ai(
             prompt.format(
                 title=task.title,
@@ -93,8 +92,10 @@ class SEOAgent(BaseAgent):
         Returns:
             Dict[str, Any]: SEO 元數據，包含標題、描述、關鍵字等。
         """
-        # 使用 AI 生成 SEO 元數據
-        prompt = f"""
+        plan_str = json.dumps(task.plan, ensure_ascii=False, indent=2) if task.plan else "無"
+        content = task.optimized_content or task.draft_content or ""
+        
+        prompt = """
         你是一位 SEO 專家。請為以下文章生成 SEO 元數據：
         
         文章標題: {title}
@@ -117,9 +118,6 @@ class SEOAgent(BaseAgent):
         }}
         """
         
-        plan_str = json.dumps(task.plan, ensure_ascii=False, indent=2) if task.plan else "無"
-        content = task.optimized_content or task.draft_content or ""
-        
         response = self.call_ai(
             prompt.format(
                 title=task.title,
@@ -134,7 +132,6 @@ class SEOAgent(BaseAgent):
             metadata = json.loads(response)
             return metadata
         except json.JSONDecodeError:
-            # 返回默認 SEO 元數據
             return {
                 "title": f"{task.title} | AI WordPress Factory",
                 "description": f"了解更多關於 {task.title} 的詳細信息和觀點。",
