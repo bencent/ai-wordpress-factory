@@ -3,6 +3,7 @@
 
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
+from skills.loader import skill_loader
 
 
 @dataclass
@@ -32,6 +33,8 @@ class BaseAgent:
         """
         self.config = config
         self.name = self.__class__.__name__.replace("Agent", "").lower()
+        self.skills_context = skill_loader.build_skills_context(self.name)
+        self.constitution_context = skill_loader.build_constitution_context()
         
     def get_prompt(self, prompt_name: str) -> str:
         """獲取指定的提示文件內容。
@@ -49,11 +52,12 @@ class BaseAgent:
                 return f.read()
         return ""
     
-    def call_ai(self, prompt: str, **kwargs) -> str:
+    def call_ai(self, prompt: str, required_skills: Optional[List[str]] = None, **kwargs) -> str:
         """調用 AI 模型。
         
         Args:
             prompt: 提示文本。
+            required_skills: 本次調用額外需要的技能名稱列表。
             **kwargs: 其他參數（如 temperature、max_tokens 等）。
         
         Returns:
@@ -61,21 +65,28 @@ class BaseAgent:
         """
         import openai
         
-        # 使用全局配置或代理人特定配置
+        if required_skills is not None:
+            skills_context = skill_loader.build_skills_context(self.name, required_skills=required_skills)
+        else:
+            skills_context = self.skills_context
+        
+        full_prompt = prompt
+        if skills_context:
+            full_prompt = f"{skills_context}\n\n{prompt}"
+        
         api_key = getattr(self.config, "openai_api_key", None)
         if not api_key:
             raise ValueError("OpenAI API Key 未配置")
         
         client = openai.OpenAI(api_key=api_key)
         
-        # 合並參數
         model = kwargs.get("model", getattr(self.config, "ai_model", "gpt-4"))
         temperature = kwargs.get("temperature", getattr(self.config, "ai_temperature", 0.7))
         max_tokens = kwargs.get("max_tokens", getattr(self.config, "ai_max_tokens", 2000))
         
         response = client.chat.completions.create(
             model=model,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": full_prompt}],
             temperature=temperature,
             max_tokens=max_tokens,
         )

@@ -17,6 +17,9 @@ from state import (
     WorkflowState,
 )
 from contracts import ReviewResult, ReviewAction, CritiqueResult, CritiqueAction
+from agents.quality_evaluator import QualityEvaluatorAgent
+from agents.content_fixer import ContentFixerAgent
+from agents.final_reviewer import FinalReviewerAgent
 
 # 配置日誌
 logging.basicConfig(
@@ -156,16 +159,14 @@ class AIWordPressFactory:
             
             while task.retry_count < task.max_retries:
                 workflow_state.update_task_status(task_id, TaskStatus.REVIEWING)
-                reviewer = self._get_agent("reviewer")
-                if reviewer:
-                    review_result = reviewer.review_content(task)
-                    task.final_content = reviewer._final_review(
-                        task.revised_content or task.optimized_content or task.draft_content or "",
-                        task
-                    )
+                evaluator = self._get_agent("quality_evaluator")
+                if evaluator:
+                    review_result = evaluator.evaluate(task)
+                    logger.info(f"任務 {task_id} 品質評估完成，分數: {review_result.score}")
                 
                 if review_result and review_result.passed:
                     review_passed = True
+                    task.final_content = task.revised_content or task.optimized_content or task.draft_content or ""
                     logger.info(f"任務 {task_id} 審閱通過，分數: {review_result.score}")
                     break
                 
@@ -186,7 +187,6 @@ class AIWordPressFactory:
                     
                     if action == "rewrite":
                         task.draft_content = self._rewrite_content(task, review_result)
-                        task.retry_count += 1
                         continue
                     elif action == "research":
                         workflow_state.update_task_status(task_id, TaskStatus.RESEARCHING)
@@ -194,7 +194,6 @@ class AIWordPressFactory:
                         if research_agent:
                             task.research_data = research_agent.gather_research(task)
                         task.draft_content = self._rewrite_content(task, review_result)
-                        task.retry_count += 1
                         continue
                     elif action == "seo":
                         workflow_state.update_task_status(task_id, TaskStatus.OPTIMIZING)
@@ -202,13 +201,31 @@ class AIWordPressFactory:
                         if seo_agent:
                             optimized_content, _ = seo_agent.optimize_content(task)
                             task.optimized_content = optimized_content
-                        task.retry_count += 1
                         continue
                     else:
                         break
             
             if not review_passed:
                 return False
+            
+            # 內容修正（審閱未通過時）
+            if not review_result.passed and review_result.issues:
+                workflow_state.update_task_status(task_id, TaskStatus.REWRITING)
+                fixer = self._get_agent("content_fixer")
+                if fixer:
+                    task.final_content = fixer.fix(task, review_result.issues)
+                    logger.info(f"任務 {task_id} 內容修正完成")
+                else:
+                    task.final_content = task.revised_content or task.optimized_content or task.draft_content or ""
+            else:
+                task.final_content = task.revised_content or task.optimized_content or task.draft_content or ""
+            
+            # 最終審核
+            workflow_state.update_task_status(task_id, TaskStatus.REVIEWING)
+            final_reviewer = self._get_agent("final_reviewer")
+            if final_reviewer:
+                task.final_content = final_reviewer.final_review(task.final_content, task)
+                logger.info(f"任務 {task_id} 最終審核完成")
             
             # Step 7: 人工校稿檢查點
             workflow_state.update_task_status(task_id, TaskStatus.MANUAL_REVIEW)
@@ -284,7 +301,9 @@ class AIWordPressFactory:
         from agents.writer import WriterAgent
         from agents.critic import CriticAgent
         from agents.seo import SEOAgent
-        from agents.reviewer import ReviewerAgent
+        from agents.quality_evaluator import QualityEvaluatorAgent
+        from agents.content_fixer import ContentFixerAgent
+        from agents.final_reviewer import FinalReviewerAgent
         from agents.router import Router
         from agents.image import ImageAgent
         from agents.learner import LearnerAgent
@@ -296,7 +315,10 @@ class AIWordPressFactory:
             "writer": WriterAgent,
             "critic": CriticAgent,
             "seo": SEOAgent,
-            "reviewer": ReviewerAgent,
+            "reviewer": None,
+            "quality_evaluator": QualityEvaluatorAgent,
+            "content_fixer": ContentFixerAgent,
+            "final_reviewer": FinalReviewerAgent,
             "router": Router,
             "image": ImageAgent,
             "learner": LearnerAgent,

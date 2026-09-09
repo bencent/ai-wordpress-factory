@@ -114,6 +114,7 @@ class WriterAgent(BaseAgent):
         Returns:
             str: 修改後的內容。
         """
+        content = task.draft_content or ""
         prompt = f"""
         你是一位專業的內容編輯。請根據以下反饋意見修改文章：
         
@@ -127,11 +128,9 @@ class WriterAgent(BaseAgent):
         """
         
         refined_content = self.call_ai(
-            prompt.format(
-                content=task.draft_content or "",
-                feedback=feedback,
-            ),
-            temperature=0.3,  # 較低的溫度以保持一致性
+            prompt,
+            required_skills=["Bencent"],
+            temperature=0.3,
         )
         
         return refined_content

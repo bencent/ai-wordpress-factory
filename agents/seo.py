@@ -1,6 +1,7 @@
 # AI WordPress Factory SEO 代理人
 # 负責優化內容的 SEO 屬性
 
+import json
 from typing import Dict, Any, Optional, Tuple
 from state import Task
 from . import BaseAgent
@@ -138,6 +139,3 @@ class SEOAgent(BaseAgent):
                 "keywords": [task.title] + (task.plan.get("關鍵字", []) if task.plan else []),
             }
 
-
-# 輔助函數：導入 json 模組
-import json

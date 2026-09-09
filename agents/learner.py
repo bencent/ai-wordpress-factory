@@ -113,7 +113,7 @@ class LearnerAgent(BaseAgent):
             }
 
     def apply_proposals(self, task: Task, approved_proposals: List[Dict[str, Any]]) -> bool:
-        """將已審核的學習提案應用到風格規則和語氣樣本。
+        """將已審核的學習提案標記為已批准。
 
         Args:
             task: 任務對象。
@@ -130,11 +130,34 @@ class LearnerAgent(BaseAgent):
             rule = proposal.get("rule", "")
             if not rule:
                 continue
-            
-            if self._append_rule(rule):
-                updated = True
+            proposal["status"] = "approved"
+            updated = True
         
         return updated
+
+    def flush_approved_rules(self, task: Task) -> bool:
+        """將已批准的學習提案寫入風格規則檔案。
+
+        Args:
+            task: 任務對象。
+
+        Returns:
+            bool: 更新是否成功。
+        """
+        approved = [p for p in task.learning_proposals if p.get("status") == "approved"]
+        if not approved:
+            return False
+
+        try:
+            with open("prompts/style-rules.md", "a", encoding="utf-8") as f:
+                for proposal in approved:
+                    rule = proposal.get("rule", "")
+                    if rule:
+                        f.write(f"\n\n## learnt from review\n\n- {rule}\n")
+            return True
+        except Exception as e:
+            self.log(f"更新風格規則失敗: {str(e)}", "error")
+            return False
 
     def _load_file(self, file_path: str) -> str:
         """讀取文件內容。
@@ -150,20 +173,3 @@ class LearnerAgent(BaseAgent):
                 return f.read()
         except FileNotFoundError:
             return ""
-
-    def _append_rule(self, rule: str) -> bool:
-        """新增規則到風格規則檔案。
-
-        Args:
-            rule: 要新增的規則。
-
-        Returns:
-            bool: 更新是否成功。
-        """
-        try:
-            with open("prompts/style-rules.md", "a", encoding="utf-8") as f:
-                f.write(f"\n\n## learnt from review\n\n- {rule}\n")
-            return True
-        except Exception as e:
-            self.log(f"更新風格規則失敗: {str(e)}", "error")
-            return False
