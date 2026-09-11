@@ -20,3 +20,6 @@ google-api-python-client>=2.100.0
 
 # 工具和實用程序
 python-dateutil>=2.8.0
+
+# Browser automation for preview rendering (Phase 7D-1)
+playwright>=1.40.0

@@ -7,6 +7,7 @@ from dataclasses import asdict
 import json
 import uuid
 import datetime
+import sys
 
 from config import config, load_config_from_file
 from state import (
@@ -16,10 +17,25 @@ from state import (
     ContentType,
     WorkflowState,
 )
-from contracts import ReviewResult, ReviewAction, CritiqueResult, CritiqueAction
+from contracts import (
+    ReviewResult, ReviewAction, CritiqueResult, CritiqueAction,
+    FrontendRequest, FrontendResult,
+    FrontendSecurityResult, GreenLightConversionResult, FrontendValidationResult,
+    FrontendProductionQualityResult,
+    FrontendGate, FrontendFailureFeedback, FrontendFailureSeverity,
+    ApprovalPolicyMode, ApprovalPolicy, ClientProfile,
+    BrandProductionRules,
+    PreviewArtifact, PreviewInfrastructureFailure, FailureCategory,
+)
 from agents.quality_evaluator import QualityEvaluatorAgent
 from agents.content_fixer import ContentFixerAgent
 from agents.final_reviewer import FinalReviewerAgent
+from agents.frontend import FrontendAgent
+from tools.frontend_security import FrontendSecurityGate
+from tools.greenlight_converter import GreenLightConverter
+from tools.frontend_validator import FrontendValidator
+from tools.frontend_production_gate import FrontendProductionQualityGate
+from tools.preview_renderer import PreviewRenderer, PreviewRenderError
 
 # 配置日誌
 logging.basicConfig(
@@ -227,56 +243,358 @@ class AIWordPressFactory:
                 task.final_content = final_reviewer.final_review(task.final_content, task)
                 logger.info(f"任務 {task_id} 最終審核完成")
             
-            # Step 7: 人工校稿檢查點
-            workflow_state.update_task_status(task_id, TaskStatus.MANUAL_REVIEW)
-            self._manual_review_checkpoint(task)
+            # Frontend Pipeline with Retry Loop
+            # Step: Frontend Generation (outside retry - generates once)
+            workflow_state.update_task_status(task_id, TaskStatus.FRONTEND_GENERATING)
+            frontend_agent = self._get_agent("frontend")
+            if not frontend_agent:
+                logger.error("FrontendAgent 未配置")
+                workflow_state.update_task_status(task_id, TaskStatus.FAILED, error_message="FrontendAgent not available")
+                return False
             
-            # Step 8: 圖片生成階段
-            workflow_state.update_task_status(task_id, TaskStatus.GENERATING_IMAGE)
-            image_agent = self._get_agent("image")
-            if image_agent and getattr(config, "agents", {}).get("image", {}).get("enabled", True):
-                try:
-                    media_id, media_url = image_agent.generate_hero_image(task)
-                    task.hero_image_id = media_id
-                    task.hero_image_url = media_url
-                    task.image_status = "success" if media_id else "failed"
-                    if media_id:
-                        logger.info(f"任務 {task_id} 圖片生成完成: {media_url}")
-                    else:
-                        logger.warning(f"任務 {task_id} 圖片生成失敗，將繼續發布（無精選圖片）")
-                except Exception as e:
-                    logger.warning(f"任務 {task_id} 圖片生成異常: {str(e)}")
-                    task.image_status = "failed"
+            frontend_request = FrontendRequest(
+                task_id=task.id,
+                content_type=task.content_type,
+                frontend_scope="page",
+                animation_required=False,
+                design_brief=task.description or f"Create a frontend for: {task.title}",
+                brand_constraints={},
+                seo_title=task.seo_title or "",
+                seo_description=task.seo_description or "",
+                seo_keywords=task.seo_keywords or [],
+                content_outline=[],
+            )
+            # Manually serialize to handle enum
+            task.frontend_request = {
+                "task_id": frontend_request.task_id,
+                "content_type": frontend_request.content_type.name if hasattr(frontend_request.content_type, 'name') else str(frontend_request.content_type),
+                "frontend_scope": frontend_request.frontend_scope,
+                "animation_required": frontend_request.animation_required,
+                "design_brief": frontend_request.design_brief,
+                "brand_constraints": frontend_request.brand_constraints,
+                "seo_title": frontend_request.seo_title,
+                "seo_description": frontend_request.seo_description,
+                "seo_keywords": frontend_request.seo_keywords,
+                "content_outline": frontend_request.content_outline,
+                "metadata": frontend_request.metadata,
+            }
+            
+            frontend_result = frontend_agent.generate_frontend(frontend_request)
+            task.frontend_result = asdict(frontend_result)
+            logger.info(f"任務 {task_id} 前端生成完成: success={frontend_result.success}")
+            
+            if not frontend_result.success:
+                workflow_state.update_task_status(task_id, TaskStatus.FAILED, error_message=f"Frontend generation failed: {frontend_result.errors}")
+                return False
+            
+            # Frontend Pipeline Retry Loop: Security -> Conversion -> Validation
+            frontend_pipeline_passed = False
+            
+            while task.frontend_retry_count < task.max_frontend_retries:
+                attempt = task.frontend_retry_count + 1
+                
+                # Structured log: frontend_retry_started
+                logger.info(
+                    "frontend_retry_started",
+                    extra={
+                        "event": "frontend_retry_started",
+                        "task_id": task_id,
+                        "attempt": attempt,
+                        "gate": "FRONTEND_PIPELINE",
+                        "status": "started",
+                        "error": None,
+                    }
+                )
+                logger.info(f"任務 {task_id} 前端管線嘗試 {attempt}/{task.max_frontend_retries}")
+                
+                # Step: Frontend Security Gate
+                workflow_state.update_task_status(task_id, TaskStatus.FRONTEND_SECURITY_CHECK)
+                security_gate = FrontendSecurityGate(config)
+                security_result = security_gate.check(
+                    html=frontend_result.html or "",
+                    css=frontend_result.css or "",
+                    javascript=frontend_result.javascript or "",
+                )
+                task.frontend_security_result = asdict(security_result)
+                logger.info(f"任務 {task_id} 前端安全檢查完成: passed={security_result.passed}")
+                
+                if not security_result.passed:
+                    feedback = self._create_frontend_failure_feedback(
+                        gate=FrontendGate.FRONTEND_SECURITY,
+                        result=security_result,
+                        attempt=attempt,
+                    )
+                    self._record_frontend_retry(task, feedback)
+                    task.frontend_retry_count += 1
+                    
+                    # Structured log: frontend_gate_failed
+                    logger.warning(
+                        "frontend_gate_failed",
+                        extra={
+                            "event": "frontend_gate_failed",
+                            "task_id": task_id,
+                            "attempt": attempt,
+                            "gate": "FRONTEND_SECURITY",
+                            "status": "failed",
+                            "error": str(security_result.errors) if security_result.errors else "Security validation failed",
+                        }
+                    )
+                    
+                    logger.warning(f"任務 {task_id} 前端安全檢查失敗，重試次數: {task.frontend_retry_count}/{task.max_frontend_retries}")
+                    if task.frontend_retry_count >= task.max_frontend_retries:
+                        break
+                    # Regenerate frontend with feedback
+                    frontend_result = self._regenerate_frontend_with_feedback(frontend_agent, frontend_request, feedback)
+                    if not frontend_result.success:
+                        workflow_state.update_task_status(task_id, TaskStatus.FAILED, error_message=f"Frontend regeneration failed: {frontend_result.errors}")
+                        return False
+                    task.frontend_result = asdict(frontend_result)
+                    continue
+                
+                # Step: GreenLight Conversion
+                workflow_state.update_task_status(task_id, TaskStatus.FRONTEND_CONVERTING)
+                converter = GreenLightConverter(config)
+                conversion_result = converter.convert(security_result.html)
+                task.frontend_conversion_result = asdict(conversion_result)
+                logger.info(f"任務 {task_id} GreenLight 轉換完成: success={conversion_result.success}")
+                
+                if not conversion_result.success:
+                    feedback = self._create_frontend_failure_feedback(
+                        gate=FrontendGate.FRONTEND_CONVERSION,
+                        result=conversion_result,
+                        attempt=attempt,
+                    )
+                    self._record_frontend_retry(task, feedback)
+                    task.frontend_retry_count += 1
+                    
+                    # Structured log: frontend_gate_failed
+                    logger.warning(
+                        "frontend_gate_failed",
+                        extra={
+                            "event": "frontend_gate_failed",
+                            "task_id": task_id,
+                            "attempt": attempt,
+                            "gate": "FRONTEND_CONVERSION",
+                            "status": "failed",
+                            "error": str(conversion_result.errors) if conversion_result.errors else "Conversion failed",
+                        }
+                    )
+                    
+                    logger.warning(f"任務 {task_id} GreenLight 轉換失敗，重試次數: {task.frontend_retry_count}/{task.max_frontend_retries}")
+                    if task.frontend_retry_count >= task.max_frontend_retries:
+                        break
+                    # Regenerate frontend with feedback
+                    frontend_result = self._regenerate_frontend_with_feedback(frontend_agent, frontend_request, feedback)
+                    if not frontend_result.success:
+                        workflow_state.update_task_status(task_id, TaskStatus.FAILED, error_message=f"Frontend regeneration failed: {frontend_result.errors}")
+                        return False
+                    task.frontend_result = asdict(frontend_result)
+                    continue
+                
+                # Update frontend_result with converted blocks for validation
+                frontend_result.blocks = conversion_result.blocks
+                task.frontend_result = asdict(frontend_result)
+                
+                # Step: Frontend Validation
+                workflow_state.update_task_status(task_id, TaskStatus.FRONTEND_VALIDATING)
+                validator = FrontendValidator(config)
+                validation_result = validator.validate(frontend_result)
+                task.frontend_validation_result = asdict(validation_result)
+                logger.info(f"任務 {task_id} 前端驗證完成: passed={validation_result.passed}, status={validation_result.validation_status}")
+                
+                if not validation_result.passed:
+                    feedback = self._create_frontend_failure_feedback(
+                        gate=FrontendGate.FRONTEND_VALIDATION,
+                        result=validation_result,
+                        attempt=attempt,
+                    )
+                    self._record_frontend_retry(task, feedback)
+                    task.frontend_retry_count += 1
+                    
+                    # Structured log: frontend_gate_failed
+                    logger.warning(
+                        "frontend_gate_failed",
+                        extra={
+                            "event": "frontend_gate_failed",
+                            "task_id": task_id,
+                            "attempt": attempt,
+                            "gate": "FRONTEND_VALIDATION",
+                            "status": "failed",
+                            "error": str(validation_result.errors) if validation_result.errors else "Validation failed",
+                        }
+                    )
+                    
+                    logger.warning(f"任務 {task_id} 前端驗證失敗，重試次數: {task.frontend_retry_count}/{task.max_frontend_retries}")
+                    if task.frontend_retry_count >= task.max_frontend_retries:
+                        break
+                    # Regenerate frontend with feedback
+                    frontend_result = self._regenerate_frontend_with_feedback(frontend_agent, frontend_request, feedback)
+                    if not frontend_result.success:
+                        workflow_state.update_task_status(task_id, TaskStatus.FAILED, error_message=f"Frontend regeneration failed: {frontend_result.errors}")
+                        return False
+                    task.frontend_result = asdict(frontend_result)
+                    continue
+                
+                # Step: Frontend Production Quality Gate
+                workflow_state.update_task_status(task_id, TaskStatus.FRONTEND_PRODUCTION_QUALITY_CHECK)
+                production_gate = FrontendProductionQualityGate(config)
+                
+                # Resolve brand rules from client profile
+                brand_rules = None
+                if task.client_profile and task.client_profile.get("brand_profile"):
+                    brand_profile_data = task.client_profile["brand_profile"]
+                    if brand_profile_data.get("production_rules"):
+                        brand_rules = BrandProductionRules.from_dict(brand_profile_data["production_rules"])
+                
+                production_result = production_gate.check(
+                    html=frontend_result.html or "",
+                    css=frontend_result.css or "",
+                    javascript=frontend_result.javascript or "",
+                    frontend_scope=frontend_request.frontend_scope,
+                    content_type=frontend_request.content_type.name if hasattr(frontend_request.content_type, 'name') else str(frontend_request.content_type),
+                    brand_rules=brand_rules,
+                )
+                task.frontend_production_quality_result = asdict(production_result)
+                logger.info(f"任務 {task_id} 前端生產品質檢查完成: passed={production_result.passed}, status={production_result.validation_status}")
+                
+                if not production_result.passed:
+                    feedback = self._create_frontend_failure_feedback(
+                        gate=FrontendGate.FRONTEND_PRODUCTION_QUALITY,
+                        result=production_result,
+                        attempt=attempt,
+                    )
+                    self._record_frontend_retry(task, feedback)
+                    task.frontend_retry_count += 1
+                    
+                    # Structured log: frontend_gate_failed
+                    logger.warning(
+                        "frontend_gate_failed",
+                        extra={
+                            "event": "frontend_gate_failed",
+                            "task_id": task_id,
+                            "attempt": attempt,
+                            "gate": "FRONTEND_PRODUCTION_QUALITY",
+                            "status": "failed",
+                            "error": str(production_result.errors) if production_result.errors else "Production quality check failed",
+                        }
+                    )
+                    
+                    logger.warning(f"任務 {task_id} 前端生產品質檢查失敗，重試次數: {task.frontend_retry_count}/{task.max_frontend_retries}")
+                    if task.frontend_retry_count >= task.max_frontend_retries:
+                        break
+                    # Regenerate frontend with feedback
+                    frontend_result = self._regenerate_frontend_with_feedback(frontend_agent, frontend_request, feedback)
+                    if not frontend_result.success:
+                        workflow_state.update_task_status(task_id, TaskStatus.FAILED, error_message=f"Frontend regeneration failed: {frontend_result.errors}")
+                        return False
+                    task.frontend_result = asdict(frontend_result)
+                    continue
+                
+                # All gates passed
+                frontend_pipeline_passed = True
+                
+                # Phase 7D-1: Preview Rendering
+                workflow_state.update_task_status(task_id, TaskStatus.FRONTEND_PREVIEW_RENDERING)
+                preview_renderer = PreviewRenderer(config)
+                
+                # attempt_number = frontend_retry_count + 1 (current attempt)
+                attempt_number = task.frontend_retry_count + 1
+                
+                preview_artifact, preview_failure = preview_renderer.render(
+                    task_id=task_id,
+                    frontend_result=frontend_result,
+                    attempt_number=attempt_number,
+                )
+                
+                if preview_failure:
+                    # Infrastructure failure - do NOT increment frontend_retry_count
+                    # Retry rendering same artifact up to MAX_INFRA_RETRIES (handled inside renderer)
+                    # If we get here, retries are exhausted
+                    
+                    # Set final failure state for infrastructure failure
+                    import datetime
+                    task.final_failed_gate = "PREVIEW_RENDER"
+                    task.final_error = f"Preview infrastructure failure: {preview_failure.error_type}: {preview_failure.message}"
+                    task.final_feedback = "Browser/render infrastructure failure. Frontend content passed all quality gates."
+                    task.failure_timestamp = datetime.datetime.now().isoformat()
+                    
+                    workflow_state.update_task_status(
+                        task_id,
+                        TaskStatus.FAILED_NEEDS_ATTENTION,
+                        error_message=f"Preview rendering failed after retries: {preview_failure.message}"
+                    )
+                    
+                    logger.error(
+                        "preview_infrastructure_failure",
+                        extra={
+                            "event": "preview_infrastructure_failure",
+                            "task_id": task_id,
+                            "attempt": attempt_number,
+                            "gate": "PREVIEW_RENDER",
+                            "status": "failed",
+                            "error": f"{preview_failure.error_type}: {preview_failure.message}",
+                            "failure_category": "infrastructure",
+                        }
+                    )
+                    
+                    logger.error(f"任務 {task_id} 預覽渲染失敗 (基礎設施): {preview_failure.message}")
+                    return False
+                
+                # Success: persist preview artifact
+                task.preview_history.append(preview_artifact.to_dict())
+                
+                logger.info(
+                    f"任務 {task_id} 預覽渲染完成: preview_id={preview_artifact.preview_id}, "
+                    f"desktop_viewport={preview_artifact.desktop_viewport_screenshot_path}, "
+                    f"mobile_viewport={preview_artifact.mobile_viewport_screenshot_path}"
+                )
+                
+                break
+            
+            if not frontend_pipeline_passed:
+                # Retry exhausted - set final failure state
+                self._finalize_frontend_failure(task)
+                
+                # Structured log: frontend_retry_exhausted
+                logger.error(
+                    "frontend_retry_exhausted",
+                    extra={
+                        "event": "frontend_retry_exhausted",
+                        "task_id": task_id,
+                        "attempt": task.frontend_retry_count,
+                        "gate": task.final_failed_gate or "UNKNOWN",
+                        "status": "exhausted",
+                        "error": task.final_error or "Frontend pipeline failed after max retries",
+                    }
+                )
+                
+                logger.error(f"任務 {task_id} 前端管線重試耗盡，狀態設為 FAILED_NEEDS_ATTENTION")
+                return False
+            
+            # Use converted blocks as the content for publishing
+            task.final_content = conversion_result.blocks
+            
+            # Phase 7C-4: Resolve ApprovalPolicy
+            approval_policy = self._resolve_approval_policy(task)
+            task.approval_policy = approval_policy.to_dict()
+            logger.info(f"任務 {task_id} 核准策略: {approval_policy.mode.value}")
+            
+            if approval_policy.mode == ApprovalPolicyMode.AUTO_PUBLISH:
+                # AUTO_PUBLISH: continue directly to ImageAgent -> Publisher
+                logger.info(f"任務 {task_id} 自動發布模式，繼續工作流程")
+                return self._continue_post_approval(task_id)
             else:
-                logger.info(f"任務 {task_id} 圖片生成已禁用，跳過")
-            
-            # Step 9: 發布階段
-            workflow_state.update_task_status(task_id, TaskStatus.PUBLISHING)
-            publisher = self._get_agent("publisher")
-            if publisher:
-                featured_media_id = task.hero_image_id if task.image_status == "success" else None
-                wordpress_id, wordpress_url = publisher.publish_content(task, featured_media_id=featured_media_id)
-                task.wordpress_id = wordpress_id
-                task.wordpress_url = wordpress_url
-                logger.info(f"任務 {task_id} 發布完成: {wordpress_url}")
-            
-            # Step 10: 完成
-            workflow_state.update_task_status(task_id, TaskStatus.COMPLETED)
-            logger.info(f"任務 {task_id} 已完成")
-            
-            # Step 11: 學習更新（發布後執行）
-            workflow_state.update_task_status(task_id, TaskStatus.LEARNING)
-            learner = self._get_agent("learner")
-            if learner:
-                learning_result = learner.analyze_review(task)
-                proposals = learning_result.get("學習提案", [])
-                if proposals:
-                    task.learning_proposals.extend(proposals)
-                    logger.info(f"任務 {task_id} 學習完成：產生 {len(proposals)} 個學習提案")
-                else:
-                    logger.info(f"任務 {task_id} 學習完成：無需更新規則庫")
-            
-            return True
+                # REQUIRE_HUMAN_REVIEW: enter AWAITING_APPROVAL
+                import datetime
+                task.status = TaskStatus.AWAITING_APPROVAL
+                task.approval_status = "pending"
+                task.approval_requested_at = datetime.datetime.now().isoformat()
+                task.updated_at = datetime.datetime.now().isoformat()
+                logger.info(f"任務 {task_id} 等待人工批准發布 (AWAITING_APPROVAL)")
+                
+                # Save state for human to review
+                self.save_state()
+                return False  # Workflow paused, not failed
             
         except Exception as e:
             logger.error(f"任務 {task_id} 失敗: {str(e)}")
@@ -307,6 +625,7 @@ class AIWordPressFactory:
         from agents.router import Router
         from agents.image import ImageAgent
         from agents.learner import LearnerAgent
+        from agents.frontend import FrontendAgent
         from tools.wordpress import WordPressPublisher
         
         agents = {
@@ -322,6 +641,7 @@ class AIWordPressFactory:
             "router": Router,
             "image": ImageAgent,
             "learner": LearnerAgent,
+            "frontend": FrontendAgent,
             "publisher": WordPressPublisher,
         }
         
@@ -410,14 +730,404 @@ class AIWordPressFactory:
         rewritten = writer.call_ai(prompt, temperature=0.7, max_tokens=4000)
         return rewritten.strip()
 
-    def _manual_review_checkpoint(self, task: Task) -> None:
+    def _create_frontend_failure_feedback(
+        self,
+        gate: FrontendGate,
+        result: Any,
+        attempt: int,
+    ) -> FrontendFailureFeedback:
+        """Create structured failure feedback for a frontend pipeline gate failure.
+        
+        Args:
+            gate: The frontend gate that failed.
+            result: The result object from the failed gate (SecurityResult, ConversionResult, or ValidationResult).
+            attempt: The current attempt number.
+            
+        Returns:
+            FrontendFailureFeedback: Structured feedback for the failure.
+        """
+        # Extract error message and details from result
+        errors = getattr(result, 'errors', []) or []
+        warnings = getattr(result, 'warnings', []) or []
+        blocked_items = getattr(result, 'blocked_items', []) or []
+        
+        # Handle errors that might be dicts (validation) or strings (security/conversion)
+        error_parts = []
+        for e in errors:
+            if isinstance(e, dict):
+                error_parts.append(f"{e.get('type', 'unknown')}: {e.get('message', '')}")
+            else:
+                error_parts.append(str(e))
+        error_msg = "; ".join(error_parts) if error_parts else "Unknown error"
+        
+        warning_parts = []
+        for w in warnings:
+            if isinstance(w, dict):
+                warning_parts.append(f"{w.get('type', 'unknown')}: {w.get('message', '')}")
+            else:
+                warning_parts.append(str(w))
+        warning_msg = "; ".join(warning_parts) if warning_parts else ""
+        
+        # Build actionable feedback based on gate
+        if gate == FrontendGate.FRONTEND_SECURITY:
+            feedback = (
+                f"Security gate rejected the frontend output. "
+                f"Errors: {error_msg}. "
+                f"Blocked items: {', '.join(blocked_items) if blocked_items else 'none'}. "
+                f"Please regenerate HTML/CSS/JS without dangerous tags, event handlers, "
+                f"javascript: URLs, eval(), external resources from non-allowlisted domains, "
+                f"or CSS expressions. Ensure all sizes are within limits."
+            )
+            details = {
+                "blocked_items": blocked_items,
+                "warnings": warnings,
+                "html_size": len(getattr(result, 'html', '') or ''),
+                "css_size": len(getattr(result, 'css', '') or ''),
+                "js_size": len(getattr(result, 'javascript', '') or ''),
+            }
+        elif gate == FrontendGate.FRONTEND_CONVERSION:
+            feedback = (
+                f"GreenLight conversion failed. "
+                f"Errors: {error_msg}. "
+                f"Warnings: {warning_msg}. "
+                f"Please ensure the HTML structure is compatible with Greenshift blocks. "
+                f"Check for unsupported HTML tags, malformed markup, or converter script issues."
+            )
+            details = {
+                "warnings": warnings,
+                "input_html_preview": (getattr(result, 'html', '') or '')[:500] if hasattr(result, 'html') else "",
+            }
+        elif gate == FrontendGate.FRONTEND_PRODUCTION_QUALITY:
+            feedback = (
+                f"Frontend production quality check failed. "
+                f"Errors: {error_msg}. "
+                f"Warnings: {warning_msg}. "
+                f"Please regenerate HTML/CSS/JS to meet production quality standards: "
+                f"reduce external dependencies, inline code size, !important usage, "
+                f"animation budget, fix accessibility issues (missing alt, form labels, heading hierarchy), "
+                f"and responsive safety (fixed widths, media queries)."
+            )
+            details = {
+                "errors": errors,
+                "warnings": warnings,
+                "diagnostics": getattr(result, 'diagnostics', {}),
+            }
+        else:  # FRONTEND_VALIDATION
+            feedback = (
+                f"Frontend validation failed. "
+                f"Errors: {error_msg}. "
+                f"Please fix HTML structure (unclosed tags), CSS syntax (unmatched braces), "
+                f"JavaScript syntax (parseable by Node.js), and WordPress block format "
+                f"(balanced wp: comments with valid JSON attributes)."
+            )
+            details = {
+                "validation_errors": errors,
+                "validation_warnings": warnings,
+                "diagnostics": getattr(result, 'diagnostics', {}),
+            }
+        
+        severity = FrontendFailureSeverity.ERROR
+        if gate == FrontendGate.FRONTEND_VALIDATION and not error_parts:
+            severity = FrontendFailureSeverity.WARNING
+        
+        return FrontendFailureFeedback(
+            gate=gate,
+            severity=severity,
+            error=error_msg,
+            feedback=feedback,
+            details=details,
+        )
+
+    def _record_frontend_retry(self, task: Task, feedback: FrontendFailureFeedback) -> None:
+        """Record a frontend retry attempt in the task's retry history.
+        
+        Args:
+            task: The task being processed.
+            feedback: The failure feedback to record.
+        """
+        history_entry = {
+            "attempt": task.frontend_retry_count + 1,
+            "gate": feedback.gate.value if isinstance(feedback.gate, FrontendGate) else feedback.gate,
+            "error": feedback.error,
+            "feedback": feedback.feedback,
+            "action": "FRONTEND_REGENERATE",
+            "timestamp": feedback.timestamp,
+            "details": feedback.details,
+        }
+        task.frontend_retry_history.append(history_entry)
+        
+        # Structured logging
+        logger.info(
+            f"Frontend retry recorded: task_id={task.id}, "
+            f"attempt={history_entry['attempt']}, gate={history_entry['gate']}, "
+            f"error={feedback.error[:100]}..."
+        )
+
+    def _regenerate_frontend_with_feedback(
+        self,
+        frontend_agent: FrontendAgent,
+        request: FrontendRequest,
+        feedback: FrontendFailureFeedback,
+    ) -> FrontendResult:
+        """Regenerate frontend with failure feedback injected into the prompt.
+        
+        Args:
+            frontend_agent: The FrontendAgent instance.
+            request: The original FrontendRequest.
+            feedback: The failure feedback to incorporate.
+            
+        Returns:
+            FrontendResult: The new frontend generation result.
+        """
+        # Build feedback-enhanced prompt
+        feedback_prompt = (
+            f"\n\nIMPORTANT: The previous attempt failed at the {feedback.gate.value} gate.\n"
+            f"Error: {feedback.error}\n"
+            f"Required fix: {feedback.feedback}\n"
+            f"Please generate corrected HTML, CSS, and JavaScript that addresses these issues."
+        )
+        
+        # Create a modified request with feedback in design_brief
+        enhanced_request = FrontendRequest(
+            task_id=request.task_id,
+            content_type=request.content_type,
+            frontend_scope=request.frontend_scope,
+            animation_required=request.animation_required,
+            design_brief=request.design_brief + feedback_prompt,
+            brand_constraints=request.brand_constraints,
+            seo_title=request.seo_title,
+            seo_description=request.seo_description,
+            seo_keywords=request.seo_keywords,
+            content_outline=request.content_outline,
+            metadata=request.metadata,
+        )
+        
+        return frontend_agent.generate_frontend(enhanced_request)
+
+    def _finalize_frontend_failure(self, task: Task) -> None:
+        """Finalize task state after frontend retry exhaustion.
+        
+        Args:
+            task: The task that failed all frontend retries.
+        """
+        import datetime
+        
+        # Determine the final failed gate from history
+        final_gate = None
+        final_error = None
+        final_feedback = None
+        
+        if task.frontend_retry_history:
+            last_entry = task.frontend_retry_history[-1]
+            final_gate = last_entry.get("gate")
+            final_error = last_entry.get("error")
+            final_feedback = last_entry.get("feedback")
+        
+        task.final_failed_gate = final_gate
+        task.final_error = final_error
+        task.final_feedback = final_feedback
+        task.failure_timestamp = datetime.datetime.now().isoformat()
+        
+        workflow_state.update_task_status(
+            task.id,
+            TaskStatus.FAILED_NEEDS_ATTENTION,
+            error_message=f"Frontend pipeline failed after {task.max_frontend_retries} retries. "
+                          f"Last failure at {final_gate}: {final_error}"
+        )
+        
+        logger.error(
+            f"Task {task.id} entered FAILED_NEEDS_ATTENTION: "
+            f"frontend_retry_count={task.frontend_retry_count}, "
+            f"final_gate={final_gate}, final_error={final_error}"
+        )
+        
+        # Structured log: task_entered_FAILED_NEEDS_ATTENTION
+        logger.error(
+            "task_entered_FAILED_NEEDS_ATTENTION",
+            extra={
+                "event": "task_entered_FAILED_NEEDS_ATTENTION",
+                "task_id": task.id,
+                "attempt": task.frontend_retry_count,
+                "gate": final_gate or "UNKNOWN",
+                "status": "FAILED_NEEDS_ATTENTION",
+                "error": final_error or "Frontend pipeline failed after max retries",
+            }
+        )
+
+    def _resolve_approval_policy(self, task: Task) -> ApprovalPolicy:
+        """Resolve the approval policy for a task.
+        
+        Priority:
+        1. Task-level approval_policy (explicit)
+        2. Task-level client_profile with approval_policy
+        3. Default: REQUIRE_HUMAN_REVIEW
+        
+        Args:
+            task: The task to resolve policy for.
+            
+        Returns:
+            ApprovalPolicy: The resolved approval policy.
+        """
+        # Check task-level explicit approval policy
+        if task.approval_policy:
+            return ApprovalPolicy.from_dict(task.approval_policy)
+        
+        # Check client profile for approval policy
+        if task.client_profile and task.client_profile.get("approval_policy"):
+            return ApprovalPolicy.from_dict(task.client_profile["approval_policy"])
+        
+        # Default: REQUIRE_HUMAN_REVIEW
+        return ApprovalPolicy(mode=ApprovalPolicyMode.REQUIRE_HUMAN_REVIEW)
+
+    def submit_approval_decision(
+        self,
+        task_id: str,
+        approved: bool,
+        feedback: Optional[str] = None
+    ) -> bool:
+        """Submit human approval decision for a task awaiting approval.
+        
+        Args:
+            task_id: The task ID.
+            approved: True if approved, False if rejected.
+            feedback: Optional human feedback (required for rejection).
+            
+        Returns:
+            bool: True if decision was processed successfully.
+        """
+        import datetime
+        
+        task = workflow_state.get_task(task_id)
+        if not task:
+            logger.error(f"Task not found: {task_id}")
+            return False
+        
+        if task.status != TaskStatus.AWAITING_APPROVAL:
+            logger.error(f"Task {task_id} is not awaiting approval (status: {task.status.name})")
+            return False
+        
+        # Record decision
+        task.approval_decision = approved
+        task.approval_feedback = feedback
+        task.approval_decided_at = datetime.datetime.now().isoformat()
+        task.approval_status = "approved" if approved else "rejected"
+        task.updated_at = datetime.datetime.now().isoformat()
+        
+        if approved:
+            # Approved: resume workflow from post-approval point
+            task.status = TaskStatus.GENERATING_IMAGE
+            logger.info(f"Task {task_id} approved, resuming workflow")
+            
+            # Continue with image generation and publishing
+            return self._continue_post_approval(task_id)
+        else:
+            # Rejected: move to REJECTED_NEEDS_REVISION
+            if not feedback:
+                logger.warning(f"Task {task_id} rejected without feedback")
+            
+            task.status = TaskStatus.REJECTED_NEEDS_REVISION
+            logger.info(f"Task {task_id} rejected, status set to REJECTED_NEEDS_REVISION")
+            
+            # Save state
+            self.save_state()
+            return True
+
+    def _continue_post_approval(self, task_id: str) -> bool:
+        """Continue workflow after approval (ImageAgent -> Publisher -> COMPLETED).
+        
+        Args:
+            task_id: The task ID.
+            
+        Returns:
+            bool: True if workflow completed successfully.
+        """
+        task = workflow_state.get_task(task_id)
+        if not task:
+            logger.error(f"Task not found: {task_id}")
+            return False
+        
+        try:
+            # Step 8: 圖片生成階段
+            workflow_state.update_task_status(task_id, TaskStatus.GENERATING_IMAGE)
+            image_agent = self._get_agent("image")
+            if image_agent and getattr(config, "agents", {}).get("image", {}).get("enabled", True):
+                try:
+                    media_id, media_url = image_agent.generate_hero_image(task)
+                    task.hero_image_id = media_id
+                    task.hero_image_url = media_url
+                    task.image_status = "success" if media_id else "failed"
+                    if media_id:
+                        logger.info(f"任務 {task_id} 圖片生成完成: {media_url}")
+                    else:
+                        logger.warning(f"任務 {task_id} 圖片生成失敗，將繼續發布（無精選圖片）")
+                except Exception as e:
+                    logger.warning(f"任務 {task_id} 圖片生成異常: {str(e)}")
+                    task.image_status = "failed"
+            else:
+                logger.info(f"任務 {task_id} 圖片生成已禁用，跳過")
+            
+            # Step 9: 發布階段
+            workflow_state.update_task_status(task_id, TaskStatus.PUBLISHING)
+            publisher = self._get_agent("publisher")
+            if publisher:
+                featured_media_id = task.hero_image_id if task.image_status == "success" else None
+                wordpress_id, wordpress_url = publisher.publish_content(task, featured_media_id=featured_media_id)
+                task.wordpress_id = wordpress_id
+                task.wordpress_url = wordpress_url
+                logger.info(f"任務 {task_id} 發布完成: {wordpress_url}")
+            
+            # Step 10: 完成
+            workflow_state.update_task_status(task_id, TaskStatus.COMPLETED)
+            logger.info(f"任務 {task_id} 已完成")
+            
+            # Step 11: 學習更新（發布後執行）
+            workflow_state.update_task_status(task_id, TaskStatus.LEARNING)
+            learner = self._get_agent("learner")
+            if learner:
+                learning_result = learner.analyze_review(task)
+                proposals = learning_result.get("學習提案", [])
+                if proposals:
+                    task.learning_proposals.extend(proposals)
+                    logger.info(f"任務 {task_id} 學習完成：產生 {len(proposals)} 個學習提案")
+                else:
+                    logger.info(f"任務 {task_id} 學習完成：無需更新規則庫")
+            
+            self.save_state()
+            return True
+            
+        except Exception as e:
+            logger.error(f"任務 {task_id} 發布後流程失敗: {str(e)}")
+            workflow_state.update_task_status(
+                task_id, 
+                TaskStatus.FAILED, 
+                error_message=str(e)
+            )
+            return False
+
+    def _manual_review_checkpoint(self, task: Task) -> bool:
         """人工校稿檢查點。暫停工作流程，等待人類審閱和修正。
 
         Args:
             task: 任務對象。
+
+        Returns:
+            bool: True 表示通過審核繼續執行，False 表示需要人工介入（非互動模式）或審核失敗。
         """
         content = task.final_content or task.revised_content or task.optimized_content or task.draft_content or ""
-        
+
+        # 非互動模式檢測：無法獲取人工審核，直接失敗關閉
+        if not sys.stdin.isatty():
+            logger.error(
+                "非互動模式下無法進行人工校稿，任務停止於 MANUAL_REVIEW 階段。"
+                " 請在互動式終端運行，或配置自動發布策略（未來功能）。"
+            )
+            workflow_state.update_task_status(
+                task.id,
+                TaskStatus.FAILED_NEEDS_ATTENTION,
+                error_message="非互動模式：無人工審核可用，任務停止於 MANUAL_REVIEW"
+            )
+            return False
+
         print("\n" + "=" * 60)
         print(f"人工校稿檢查點：任務「{task.title}」")
         print("=" * 60)
@@ -429,24 +1139,34 @@ class AIWordPressFactory:
         print("- 或輸入 '.' 表示接受原稿")
         print("- 或輸入 'skip' 跳過校稿（不建議）")
         print("=" * 60)
-        
+
         try:
             user_input = input("\n請輸入修正內容: ").strip()
         except EOFError:
-            logger.warning("無法讀取使用者輸入，使用 AI 草稿")
-            return
-        
+            logger.error(
+                "互動模式下發生 EOF，無法獲取人工審核輸入，任務停止於 MANUAL_REVIEW 階段。"
+            )
+            workflow_state.update_task_status(
+                task.id,
+                TaskStatus.FAILED_NEEDS_ATTENTION,
+                error_message="互動模式下發生 EOF：無人工審核輸入可用，任務停止於 MANUAL_REVIEW"
+            )
+            return False
+
         if user_input == ".":
             logger.info("使用者接受原稿")
-            return
-        
+            return True
+
         if user_input.lower() == "skip":
             logger.warning("使用者跳過校稿")
-            return
-        
+            return True
+
         if user_input:
             task.final_content = user_input
             logger.info("使用者提供了修正內容")
+            return True
+
+        return True
 
     def save_state(self, file_path: str = "workflow_state.json") -> None:
         """保存工作流程狀態到文件。
@@ -468,7 +1188,11 @@ class AIWordPressFactory:
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            workflow_state = WorkflowState.from_dict(data)
+            # Update existing workflow_state in place to preserve references
+            loaded_state = WorkflowState.from_dict(data)
+            workflow_state.tasks = loaded_state.tasks
+            workflow_state.current_task_id = loaded_state.current_task_id
+            workflow_state.global_state = loaded_state.global_state
             logger.info(f"工作流程狀態已從 {file_path} 加載")
         except FileNotFoundError:
             logger.warning(f"文件 {file_path} 不存在，使用默認狀態")

@@ -4,6 +4,7 @@
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Any
 from enum import Enum, auto
+import datetime
 
 
 class TaskStatus(Enum):
@@ -20,9 +21,20 @@ class TaskStatus(Enum):
     MANUAL_REVIEW = auto() # 人工校稿中
     LEARNING = auto()      # 學習更新中
     GENERATING_IMAGE = auto()  # 圖片生成中
+    # Frontend pipeline statuses
+    FRONTEND_GENERATING = auto()  # 前端生成中
+    FRONTEND_SECURITY_CHECK = auto()  # 前端安全檢查中
+    FRONTEND_CONVERTING = auto()  # 前端轉換中
+    FRONTEND_VALIDATING = auto()  # 前端驗證中
+    FRONTEND_PRODUCTION_QUALITY_CHECK = auto()  # 前端生產品質檢查中
+    FRONTEND_PREVIEW_RENDERING = auto()  # 前端預覽渲染中
+    # Phase 7C-4: Approval workflow statuses
+    AWAITING_APPROVAL = auto()  # 等待人工批准發布
+    REJECTED_NEEDS_REVISION = auto()  # 人工拒絕，需要修訂
     PUBLISHING = auto()    # 發布中
     COMPLETED = auto()     # 已完成
     FAILED = auto()        # 失敗
+    FAILED_NEEDS_ATTENTION = auto()  # 需要人工介入的失敗狀態
 
 
 class ContentType(Enum):
@@ -55,9 +67,20 @@ class Task:
     optimized_content: Optional[str] = None
     final_content: Optional[str] = None
     
-    # Retry 保護
+    # Retry 保護 (Content retry)
     retry_count: int = 0
     max_retries: int = 3
+    
+    # Frontend retry 保護
+    frontend_retry_count: int = 0
+    max_frontend_retries: int = 3
+    frontend_retry_history: List[Dict[str, Any]] = field(default_factory=list)
+    
+    # Final frontend failure tracking
+    final_failed_gate: Optional[str] = None
+    final_error: Optional[str] = None
+    final_feedback: Optional[str] = None
+    failure_timestamp: Optional[str] = None
     
     # 圖片相關
     image_prompt: Optional[str] = None
@@ -74,10 +97,44 @@ class Task:
     # 學習相關
     learning_proposals: List[Dict[str, Any]] = field(default_factory=list)
     
-    # 發布相關
+    # Frontend pipeline fields
+    frontend_request: Optional[Dict[str, Any]] = None
+    frontend_result: Optional[Dict[str, Any]] = None
+    frontend_security_result: Optional[Dict[str, Any]] = None
+    frontend_conversion_result: Optional[Dict[str, Any]] = None
+    frontend_validation_result: Optional[Dict[str, Any]] = None
+    frontend_production_quality_result: Optional[Dict[str, Any]] = None
+    
+# 發布相關
     wordpress_id: Optional[int] = None
     wordpress_url: Optional[str] = None
     
+    # Phase 7C-4: Approval workflow fields
+    client_profile: Optional[Dict[str, Any]] = None
+    approval_policy: Optional[Dict[str, Any]] = None
+    approval_status: Optional[str] = None  # "pending", "approved", "rejected"
+    approval_requested_at: Optional[str] = None
+    approval_decided_at: Optional[str] = None
+    approval_feedback: Optional[str] = None
+    approval_decision: Optional[bool] = None
+    
+    # Phase 7D-1: Preview rendering fields
+    preview_history: List[Dict[str, Any]] = field(default_factory=list)
+    # latest_preview is derived from preview_history[-1] for backward compat
+    # Use _latest_preview_legacy for deserialization of old state
+    _latest_preview_legacy: Optional[Dict[str, Any]] = field(default=None, repr=False)
+
+    @property
+    def latest_preview(self) -> Optional[Dict[str, Any]]:
+        """Derive latest preview from preview_history (durable source of truth).
+        
+        Falls back to legacy _latest_preview_legacy for backward compatibility
+        with old serialized state that had duplicated latest_preview field.
+        """
+        if self.preview_history:
+            return self.preview_history[-1]
+        return self._latest_preview_legacy
+
     def __post_init__(self):
         """初始化後自動設定時間戳。"""
         import datetime
@@ -117,8 +174,29 @@ class Task:
             "seo_description": self.seo_description,
             "seo_keywords": self.seo_keywords,
             "learning_proposals": self.learning_proposals,
+            "frontend_request": self.frontend_request,
+            "frontend_result": self.frontend_result,
+            "frontend_security_result": self.frontend_security_result,
+            "frontend_conversion_result": self.frontend_conversion_result,
+            "frontend_validation_result": self.frontend_validation_result,
+            "frontend_production_quality_result": self.frontend_production_quality_result,
+            "frontend_retry_count": self.frontend_retry_count,
+            "max_frontend_retries": self.max_frontend_retries,
+            "frontend_retry_history": self.frontend_retry_history,
+            "final_failed_gate": self.final_failed_gate,
+            "final_error": self.final_error,
+            "final_feedback": self.final_feedback,
+            "failure_timestamp": self.failure_timestamp,
             "wordpress_id": self.wordpress_id,
             "wordpress_url": self.wordpress_url,
+            "client_profile": self.client_profile,
+            "approval_policy": self.approval_policy,
+            "approval_status": self.approval_status,
+            "approval_requested_at": self.approval_requested_at,
+            "approval_decided_at": self.approval_decided_at,
+            "approval_feedback": self.approval_feedback,
+            "approval_decision": self.approval_decision,
+            "preview_history": self.preview_history,
         }
 
     @classmethod
@@ -161,8 +239,30 @@ class Task:
             seo_description=data.get("seo_description"),
             seo_keywords=data.get("seo_keywords"),
             learning_proposals=data.get("learning_proposals", []),
+            frontend_request=data.get("frontend_request"),
+            frontend_result=data.get("frontend_result"),
+            frontend_security_result=data.get("frontend_security_result"),
+            frontend_conversion_result=data.get("frontend_conversion_result"),
+            frontend_validation_result=data.get("frontend_validation_result"),
+            frontend_production_quality_result=data.get("frontend_production_quality_result"),
+            frontend_retry_count=data.get("frontend_retry_count", 0),
+            max_frontend_retries=data.get("max_frontend_retries", 3),
+            frontend_retry_history=data.get("frontend_retry_history", []),
+            final_failed_gate=data.get("final_failed_gate"),
+            final_error=data.get("final_error"),
+            final_feedback=data.get("final_feedback"),
+            failure_timestamp=data.get("failure_timestamp"),
             wordpress_id=data.get("wordpress_id"),
             wordpress_url=data.get("wordpress_url"),
+            client_profile=data.get("client_profile"),
+            approval_policy=data.get("approval_policy"),
+            approval_status=data.get("approval_status"),
+            approval_requested_at=data.get("approval_requested_at"),
+            approval_decided_at=data.get("approval_decided_at"),
+            approval_feedback=data.get("approval_feedback"),
+            approval_decision=data.get("approval_decision"),
+            preview_history=data.get("preview_history", []),
+            _latest_preview_legacy=data.get("latest_preview"),
         )
 
 

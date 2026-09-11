@@ -3,7 +3,7 @@
 
 import os
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, List
 
 
 @dataclass
@@ -31,9 +31,16 @@ class Config:
     max_retries: int = 3
     image_required: bool = False
     
+    # 前端安全配置
+    allowed_domains: List[str] = None
+    frontend_max_html_size: int = 100 * 1024
+    frontend_max_css_size: int = 50 * 1024
+    frontend_max_js_size: int = 50 * 1024
+    frontend_max_total_size: int = 200 * 1024
+    
     # 代理人配置
     agents: dict = None
-    
+
     def __post_init__(self):
         """初始化後加載環境變量中的配置。"""
         self.openai_api_key = os.getenv("OPENAI_API_KEY", self.openai_api_key)
@@ -44,7 +51,16 @@ class Config:
         self.search_api_key = os.getenv("SEARCH_API_KEY", self.search_api_key)
         self.search_engine_id = os.getenv("SEARCH_ENGINE_ID", self.search_engine_id)
         
-        # 默認代理人配置
+        # 預設允許的域名：從 WordPress URL 解析
+        if self.allowed_domains is None:
+            self.allowed_domains = []
+            if self.wordpress_url:
+                from urllib.parse import urlparse
+                parsed = urlparse(self.wordpress_url)
+                if parsed.netloc:
+                    self.allowed_domains.append(parsed.netloc)
+        
+        # 預設代理人配置
         if self.agents is None:
             self.agents = {
                 "planner": {"enabled": True},
@@ -103,5 +119,10 @@ def load_config_from_file(file_path: str = "config.json") -> Config:
         ai_max_tokens=data.get("ai_max_tokens", 2000),
         max_retries=data.get("max_retries", 3),
         image_required=data.get("image_required", False),
+        allowed_domains=data.get("allowed_domains"),
+        frontend_max_html_size=data.get("frontend_max_html_size", 100 * 1024),
+        frontend_max_css_size=data.get("frontend_max_css_size", 50 * 1024),
+        frontend_max_js_size=data.get("frontend_max_js_size", 50 * 1024),
+        frontend_max_total_size=data.get("frontend_max_total_size", 200 * 1024),
         agents=data.get("agents"),
     )
