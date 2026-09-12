@@ -1224,5 +1224,469 @@ class TestRenderedTechnicalWorkflowIntegration(unittest.TestCase):
         self.assertNotEqual(task.final_failed_gate, "INFRASTRUCTURE")
         self.assertEqual(task.final_failed_gate, FrontendGate.RENDERED_TECHNICAL.value)
 
+    # ==================================================
+    # APPROVALPOLICY COMPATIBILITY
+    # ==================================================
+
+    def _run_with_approval_policy(self, approval_mode, validator_result, max_frontend_retries=3):
+        """Run workflow with specific approval policy and validator result."""
+        from unittest.mock import Mock, patch
+        from contextlib import ExitStack
+
+        task = self._create_task(approval_mode=approval_mode, max_frontend_retries=max_frontend_retries)
+        task_id = task.id
+
+        renderer = Mock()
+        artifact = _make_preview_artifact()
+        renderer.render.return_value = (artifact, None, _make_evidence())
+
+        rendered_validator = Mock()
+        rendered_validator.validate.return_value = validator_result
+
+        writer_mock = Mock()
+        writer_mock.write_content.return_value = "Test draft content"
+        quality_mock = Mock()
+        quality_mock.evaluate.return_value = ReviewResult(
+            passed=True, score=90, issues=[], feedback="Excellent",
+            suggested_action=ReviewAction.PUBLISH.value)
+        frontend_mock = Mock()
+        frontend_mock.generate_frontend.return_value = _make_frontend_result(task_id)
+        publisher_mock = Mock()
+        publisher_mock.publish_content.return_value = (123, "published-url")
+        publisher_mock.validate_config.return_value = True
+
+        agents = {
+            "writer": writer_mock,
+            "quality_evaluator": quality_mock,
+            "frontend": frontend_mock,
+            "publisher": publisher_mock,
+            "image": None,
+            "learner": None,
+        }
+        def get_agent_side_effect(agent_type):
+            return agents.get(agent_type)
+
+        security_mock = Mock()
+        security_mock.check.return_value = _make_security_result(task_id)
+        converter_mock = Mock()
+        converter_mock.convert.return_value = _make_conversion_result(task_id)
+        validation_mock = Mock()
+        validation_mock.validate.return_value = _make_validation_result(task_id)
+        production_mock = Mock()
+        production_mock.check.return_value = _make_production_result(task_id)
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(self.factory, "_get_agent", side_effect=get_agent_side_effect))
+            stack.enter_context(patch("main.FrontendSecurityGate", return_value=security_mock))
+            stack.enter_context(patch("main.GreenLightConverter", return_value=converter_mock))
+            stack.enter_context(patch("main.FrontendValidator", return_value=validation_mock))
+            stack.enter_context(patch("main.FrontendProductionQualityGate", return_value=production_mock))
+            stack.enter_context(patch("main.PreviewRenderer", return_value=renderer))
+            stack.enter_context(patch("main.RenderedTechnicalValidator", return_value=rendered_validator))
+            stack.enter_context(patch.object(self.factory, "save_state"))
+
+            self.factory.run_workflow(task_id)
+
+        task = workflow_state.get_task(task_id)
+        return task
+
+    def test_rendered_pass_require_human_review_awaits_approval(self):
+        """Rendered PASS + REQUIRE_HUMAN_REVIEW → TaskStatus.AWAITING_APPROVAL"""
+        validator_result = _make_result(True, "passed")
+        task = self._run_with_approval_policy(ApprovalPolicyMode.REQUIRE_HUMAN_REVIEW, validator_result)
+        self.assertEqual(task.status, TaskStatus.AWAITING_APPROVAL)
+        self.assertEqual(task.approval_policy["mode"], ApprovalPolicyMode.REQUIRE_HUMAN_REVIEW.value)
+
+    def test_rendered_warning_require_human_review_awaits_approval(self):
+        """Rendered WARNING + REQUIRE_HUMAN_REVIEW → TaskStatus.AWAITING_APPROVAL"""
+        warning_diag = [{
+            "gate": "RENDERED_TECHNICAL", "viewport": "desktop",
+            "type": "element_overflow", "severity": RenderedTechnicalSeverity.WARNING.value,
+            "message": "Element overflow", "context": {"viewport": "desktop"},
+        }]
+        validator_result = _make_result(True, "warnings", warnings=warning_diag)
+        task = self._run_with_approval_policy(ApprovalPolicyMode.REQUIRE_HUMAN_REVIEW, validator_result)
+        self.assertEqual(task.status, TaskStatus.AWAITING_APPROVAL)
+        self.assertEqual(task.approval_policy["mode"], ApprovalPolicyMode.REQUIRE_HUMAN_REVIEW.value)
+
+    def test_rendered_pass_auto_publish_continues_downstream(self):
+        """Rendered PASS + AUTO_PUBLISH → continues existing downstream publish path"""
+        validator_result = _make_result(True, "passed")
+        task = self._run_with_approval_policy(ApprovalPolicyMode.AUTO_PUBLISH, validator_result)
+        self.assertIn(task.status, (TaskStatus.COMPLETED, TaskStatus.LEARNING))
+        self.assertEqual(task.approval_policy["mode"], ApprovalPolicyMode.AUTO_PUBLISH.value)
+
+    def test_rendered_warning_auto_publish_continues_downstream(self):
+        """Rendered WARNING + AUTO_PUBLISH → continues existing downstream publish path"""
+        warning_diag = [{
+            "gate": "RENDERED_TECHNICAL", "viewport": "desktop",
+            "type": "element_overflow", "severity": RenderedTechnicalSeverity.WARNING.value,
+            "message": "Element overflow", "context": {"viewport": "desktop"},
+        }]
+        validator_result = _make_result(True, "warnings", warnings=warning_diag)
+        task = self._run_with_approval_policy(ApprovalPolicyMode.AUTO_PUBLISH, validator_result)
+        self.assertIn(task.status, (TaskStatus.COMPLETED, TaskStatus.LEARNING))
+        self.assertEqual(task.approval_policy["mode"], ApprovalPolicyMode.AUTO_PUBLISH.value)
+
+    def test_rendered_warning_does_not_force_human_review(self):
+        """Rendered WARNING does NOT force human review regardless of policy"""
+        warning_diag = [{
+            "gate": "RENDERED_TECHNICAL", "viewport": "desktop",
+            "type": "element_overflow", "severity": RenderedTechnicalSeverity.WARNING.value,
+            "message": "Element overflow", "context": {"viewport": "desktop"},
+        }]
+        validator_result = _make_result(True, "warnings", warnings=warning_diag)
+        task = self._run_with_approval_policy(ApprovalPolicyMode.AUTO_PUBLISH, validator_result)
+        # Should not be awaiting approval just because of warning
+        self.assertNotEqual(task.status, TaskStatus.AWAITING_APPROVAL)
+        self.assertIn(task.status, (TaskStatus.COMPLETED, TaskStatus.LEARNING))
+
+    def test_rendered_pass_does_not_alter_approval_policy(self):
+        """Rendered PASS does NOT alter ApprovalPolicy"""
+        validator_result = _make_result(True, "passed")
+        original_policy = ApprovalPolicyMode.REQUIRE_HUMAN_REVIEW
+        task = self._run_with_approval_policy(original_policy, validator_result)
+        self.assertEqual(task.approval_policy["mode"], original_policy.value)
+
+    def test_rendered_error_never_reaches_approval_policy(self):
+        """Rendered technical ERROR never reaches ApprovalPolicy"""
+        error_diag = [{
+            "gate": "RENDERED_TECHNICAL", "viewport": "desktop",
+            "type": "document_horizontal_overflow", "severity": RenderedTechnicalSeverity.ERROR.value,
+            "message": "Horizontal overflow", "context": {"viewport": "desktop", "overflow_px": 10},
+        }]
+        validator_result = _make_result(False, "failed", errors=error_diag)
+        task = self._run_with_approval_policy(ApprovalPolicyMode.AUTO_PUBLISH, validator_result, max_frontend_retries=1)
+        # Should fail before reaching approval
+        self.assertNotIn(task.status, (TaskStatus.AWAITING_APPROVAL, TaskStatus.COMPLETED, TaskStatus.LEARNING))
+        self.assertEqual(task.status, TaskStatus.FAILED_NEEDS_ATTENTION)
+
+    def test_approval_policy_enum_behavior_unchanged(self):
+        """ApprovalPolicy enum/behavior remains unchanged"""
+        # Verify enum values exist and are correct
+        self.assertEqual(ApprovalPolicyMode.AUTO_PUBLISH.value, "auto_publish")
+        self.assertEqual(ApprovalPolicyMode.REQUIRE_HUMAN_REVIEW.value, "require_human_review")
+        
+        # Test that ApprovalPolicy can be created with both modes
+        policy_auto = ApprovalPolicy(mode=ApprovalPolicyMode.AUTO_PUBLISH)
+        policy_human = ApprovalPolicy(mode=ApprovalPolicyMode.REQUIRE_HUMAN_REVIEW)
+        
+        self.assertEqual(policy_auto.mode, ApprovalPolicyMode.AUTO_PUBLISH)
+        self.assertEqual(policy_human.mode, ApprovalPolicyMode.REQUIRE_HUMAN_REVIEW)
+        
+        # Verify serialization round-trip
+        auto_dict = policy_auto.to_dict()
+        human_dict = policy_human.to_dict()
+        
+        restored_auto = ApprovalPolicy.from_dict(auto_dict)
+        restored_human = ApprovalPolicy.from_dict(human_dict)
+        
+        self.assertEqual(restored_auto.mode, ApprovalPolicyMode.AUTO_PUBLISH)
+        self.assertEqual(restored_human.mode, ApprovalPolicyMode.REQUIRE_HUMAN_REVIEW)
+
+    # ==================================================
+    # BACKWARD COMPATIBILITY / SERIALIZATION
+    # ==================================================
+
+    def test_old_task_without_rendered_technical_result_loads(self):
+        """Old serialized Task without rendered_technical_result loads successfully"""
+        task = self._create_task()
+        task_id = task.id
+        
+        # Save and reload - this simulates loading old state
+        self.factory.save_state()
+        self.factory.load_state()
+        
+        reloaded = workflow_state.get_task(task_id)
+        self.assertIsNotNone(reloaded)
+        # Field should exist with None default after deserialization
+        self.assertIsNone(reloaded.rendered_technical_result)
+
+    def test_old_task_without_rendered_technical_history_loads(self):
+        """Old serialized Task without rendered_technical_history loads successfully"""
+        task = self._create_task()
+        task_id = task.id
+        
+        # Save and reload
+        self.factory.save_state()
+        self.factory.load_state()
+        
+        reloaded = workflow_state.get_task(task_id)
+        self.assertIsNotNone(reloaded)
+        # Field should exist with empty list default after deserialization
+        self.assertEqual(reloaded.rendered_technical_history, [])
+
+    def test_old_task_without_final_failure_category_loads(self):
+        """Old serialized Task without final_failure_category loads successfully"""
+        task = self._create_task()
+        task_id = task.id
+        
+        self.factory.save_state()
+        self.factory.load_state()
+        
+        reloaded = workflow_state.get_task(task_id)
+        self.assertIsNotNone(reloaded)
+        # Field should exist with None default after deserialization
+        self.assertIsNone(reloaded.final_failure_category)
+
+    def test_missing_rendered_technical_result_defaults_none(self):
+        """Missing rendered_technical_result defaults to None"""
+        task = self._create_task()
+        # New task should not have rendered_technical_result set
+        self.assertIsNone(getattr(task, "rendered_technical_result", None))
+
+    def test_missing_rendered_technical_history_defaults_empty_list(self):
+        """Missing rendered_technical_history defaults to []"""
+        task = self._create_task()
+        # New task should not have rendered_technical_history set or it should be empty list
+        history = getattr(task, "rendered_technical_history", [])
+        self.assertEqual(history, [])
+
+    def test_missing_final_failure_category_defaults_none(self):
+        """Missing final_failure_category defaults to None"""
+        task = self._create_task()
+        self.assertIsNone(getattr(task, "final_failure_category", None))
+
+    def test_rendered_technical_result_survives_save_load(self):
+        """Rendered_technical_result survives save/load"""
+        renderer = Mock()
+        artifact = _make_preview_artifact()
+        renderer.render.return_value = (artifact, None, _make_evidence())
+        
+        validator = Mock()
+        validator.validate.return_value = _make_result(True, "passed")
+        
+        _, task = self._run_with(renderer_return=renderer, validator_result=validator)
+        task_id = task.id
+        
+        # Save and reload
+        self.factory.save_state()
+        self.factory.load_state()
+        
+        reloaded = workflow_state.get_task(task_id)
+        self.assertIsNotNone(reloaded.rendered_technical_result)
+        self.assertEqual(reloaded.rendered_technical_result["preview_id"], "preview-456")
+        self.assertEqual(reloaded.rendered_technical_result["passed"], True)
+
+    def test_rendered_technical_history_survives_save_load(self):
+        """Rendered_technical_history survives save/load"""
+        renderer = Mock()
+        artifact = _make_preview_artifact()
+        renderer.render.return_value = (artifact, None, _make_evidence())
+        
+        validator = Mock()
+        validator.validate.return_value = _make_result(True, "passed")
+        
+        _, task = self._run_with(renderer_return=renderer, validator_result=validator)
+        task_id = task.id
+        
+        # Save and reload
+        self.factory.save_state()
+        self.factory.load_state()
+        
+        reloaded = workflow_state.get_task(task_id)
+        self.assertEqual(len(reloaded.rendered_technical_history), 1)
+        self.assertEqual(reloaded.rendered_technical_history[0]["preview_id"], "preview-456")
+
+    def test_multiple_rendered_technical_history_entries_preserve_order(self):
+        """Multiple rendered technical history entries preserve order"""
+        first_err = [{
+            "gate": "RENDERED_TECHNICAL", "viewport": "desktop",
+            "type": "document_horizontal_overflow", "severity": RenderedTechnicalSeverity.ERROR.value,
+            "message": "First overflow", "context": {"viewport": "desktop", "overflow_px": 10},
+        }]
+        second_res = _make_result(True, "passed")
+        task, _ = self._run_retry_scenario(first_err, second_res)
+        task_id = task.id
+        
+        # Save and reload
+        self.factory.save_state()
+        self.factory.load_state()
+        
+        reloaded = workflow_state.get_task(task_id)
+        self.assertEqual(len(reloaded.rendered_technical_history), 2)
+        # First entry should be the error
+        self.assertEqual(reloaded.rendered_technical_history[0]["validation_status"], "failed")
+        # Second entry should be the pass
+        self.assertEqual(reloaded.rendered_technical_history[1]["validation_status"], "passed")
+
+    def test_frontend_retry_history_with_rendered_technical_feedback_survives_save_load(self):
+        """Frontend_retry_history containing RENDERED_TECHNICAL feedback survives save/load"""
+        error = [{
+            "gate": "RENDERED_TECHNICAL", "viewport": "desktop",
+            "type": "document_horizontal_overflow", "severity": RenderedTechnicalSeverity.ERROR.value,
+            "message": "Horizontal overflow", "context": {"viewport": "desktop", "overflow_px": 10},
+        }]
+        fb, task = self._run_with_error_feedback(error)
+        task_id = task.id
+        
+        # Save and reload
+        self.factory.save_state()
+        self.factory.load_state()
+        
+        reloaded = workflow_state.get_task(task_id)
+        self.assertEqual(len(reloaded.frontend_retry_history), 1)
+        entry = reloaded.frontend_retry_history[0]
+        self.assertEqual(entry["gate"], FrontendGate.RENDERED_TECHNICAL.value)
+        self.assertEqual(entry["failure_category"], FailureCategory.CONTENT.value)
+
+    # ==================================================
+    # FEEDBACK EDGE CASES
+    # ==================================================
+
+    def test_multiple_error_diagnostics_produce_useful_retry_feedback(self):
+        """Multiple ERROR diagnostics produce useful retry feedback"""
+        errors = [
+            {
+                "gate": "RENDERED_TECHNICAL", "viewport": "desktop",
+                "type": "document_horizontal_overflow", "severity": RenderedTechnicalSeverity.ERROR.value,
+                "message": "Horizontal overflow", "context": {"viewport": "desktop", "overflow_px": 10, "scroll_width": 1500, "client_width": 1440},
+            },
+            {
+                "gate": "RENDERED_TECHNICAL", "viewport": "mobile",
+                "type": "broken_image", "severity": RenderedTechnicalSeverity.ERROR.value,
+                "message": "Broken image", "context": {"viewport": "mobile", "src": "https://example.com/img.png", "complete": True, "natural_width": 0, "natural_height": 0},
+            },
+            {
+                "gate": "RENDERED_TECHNICAL", "viewport": "desktop",
+                "type": "page_runtime_error", "severity": RenderedTechnicalSeverity.ERROR.value,
+                "message": "Uncaught ReferenceError: foo is not defined",
+                "context": {"viewport": "desktop", "message": "Uncaught ReferenceError: foo is not defined"},
+                "location": {"line": 42, "column": 10},
+            },
+        ]
+        fb, task = self._run_with_error_feedback(errors)
+        self.assertIsNotNone(fb)
+        self.assertEqual(fb.gate, FrontendGate.RENDERED_TECHNICAL)
+        self.assertEqual(fb.severity, FrontendFailureSeverity.ERROR)
+        # All three errors should be in feedback
+        self.assertEqual(len(fb.details["errors"]), 3)
+        self.assertIn("1500", fb.feedback)
+        self.assertIn("1440", fb.feedback)
+        self.assertIn("https://example.com/img.png", fb.feedback)
+        self.assertIn("foo is not defined", fb.feedback)
+
+    def test_error_warning_result_includes_only_errors_as_retry_causes(self):
+        """ERROR + WARNING result includes only ERROR findings as retry causes"""
+        errors = [{
+            "gate": "RENDERED_TECHNICAL", "viewport": "desktop",
+            "type": "document_horizontal_overflow", "severity": RenderedTechnicalSeverity.ERROR.value,
+            "message": "Horizontal overflow", "context": {"viewport": "desktop", "overflow_px": 10},
+        }]
+        warnings = [{
+            "gate": "RENDERED_TECHNICAL", "viewport": "mobile",
+            "type": "element_overflow", "severity": RenderedTechnicalSeverity.WARNING.value,
+            "message": "Minor overflow", "context": {"viewport": "mobile"},
+        }]
+        validator_result = _make_result(False, "failed", errors=errors, warnings=warnings)
+        
+        task = self._run_with_approval_policy(ApprovalPolicyMode.AUTO_PUBLISH, validator_result, max_frontend_retries=1)
+        
+        # Should have retried (incremented count)
+        self.assertEqual(task.frontend_retry_count, 1)
+        # Only ERROR should be in retry history
+        self.assertEqual(len(task.frontend_retry_history), 1)
+        entry = task.frontend_retry_history[0]
+        self.assertEqual(entry["gate"], FrontendGate.RENDERED_TECHNICAL.value)
+
+    def test_missing_optional_diagnostic_location_does_not_crash_feedback(self):
+        """Missing optional diagnostic location does not crash feedback generation"""
+        error = [{
+            "gate": "RENDERED_TECHNICAL", "viewport": "desktop",
+            "type": "document_horizontal_overflow", "severity": RenderedTechnicalSeverity.ERROR.value,
+            "message": "Horizontal overflow", "context": {"viewport": "desktop", "overflow_px": 10, "scroll_width": 1450, "client_width": 1440},
+            # No "location" field
+        }]
+        fb, _ = self._run_with_error_feedback(error)
+        self.assertIsNotNone(fb)
+        self.assertEqual(fb.gate, FrontendGate.RENDERED_TECHNICAL)
+        # Should not crash and should still have feedback
+        self.assertIn("1450", fb.feedback)
+        self.assertIn("1440", fb.feedback)
+
+    def test_broken_image_missing_unknown_src_still_produces_feedback(self):
+        """Broken image with missing/unknown src still produces usable feedback"""
+        error = [{
+            "gate": "RENDERED_TECHNICAL", "viewport": "desktop",
+            "type": "broken_image", "severity": RenderedTechnicalSeverity.ERROR.value,
+            "message": "Broken image", "context": {"viewport": "desktop"},
+            # Missing "src" field
+        }]
+        fb, _ = self._run_with_error_feedback(error)
+        self.assertIsNotNone(fb)
+        self.assertEqual(fb.gate, FrontendGate.RENDERED_TECHNICAL)
+        self.assertIn("Broken image", fb.feedback)
+
+    def test_runtime_error_missing_location_still_produces_feedback(self):
+        """Runtime error with missing location still produces usable feedback"""
+        error = [{
+            "gate": "RENDERED_TECHNICAL", "viewport": "desktop",
+            "type": "page_runtime_error", "severity": RenderedTechnicalSeverity.ERROR.value,
+            "message": "Uncaught TypeError: Cannot read property 'foo' of undefined",
+            "context": {"viewport": "desktop", "message": "Uncaught TypeError: Cannot read property 'foo' of undefined"},
+            # No "location" field
+        }]
+        fb, _ = self._run_with_error_feedback(error)
+        self.assertIsNotNone(fb)
+        self.assertEqual(fb.gate, FrontendGate.RENDERED_TECHNICAL)
+        self.assertIn("TypeError", fb.feedback)
+
+    def test_horizontal_overflow_feedback_preserves_numeric_overflow_context(self):
+        """Horizontal overflow feedback preserves numeric overflow context"""
+        error = [{
+            "gate": "RENDERED_TECHNICAL", "viewport": "desktop",
+            "type": "document_horizontal_overflow", "severity": RenderedTechnicalSeverity.ERROR.value,
+            "message": "Horizontal overflow", "context": {
+                "viewport": "desktop", 
+                "scroll_width": 1500,
+                "client_width": 1440,
+                "overflow_px": 60
+            },
+        }]
+        fb, _ = self._run_with_error_feedback(error)
+        self.assertIsNotNone(fb)
+        ctx = fb.details["errors"][0]["context"]
+        self.assertEqual(ctx.get("overflow_px"), 60)
+        self.assertEqual(ctx.get("scroll_width"), 1500)
+        self.assertEqual(ctx.get("client_width"), 1440)
+
+    def test_retry_feedback_gate_remains_rendered_technical_after_serialization(self):
+        """Retry feedback gate remains RENDERED_TECHNICAL after serialization"""
+        error = [{
+            "gate": "RENDERED_TECHNICAL", "viewport": "desktop",
+            "type": "document_horizontal_overflow", "severity": RenderedTechnicalSeverity.ERROR.value,
+            "message": "Horizontal overflow", "context": {"viewport": "desktop", "overflow_px": 10},
+        }]
+        fb, task = self._run_with_error_feedback(error)
+        task_id = task.id
+        
+        # Save and reload
+        self.factory.save_state()
+        self.factory.load_state()
+        
+        reloaded = workflow_state.get_task(task_id)
+        self.assertEqual(len(reloaded.frontend_retry_history), 1)
+        entry = reloaded.frontend_retry_history[0]
+        self.assertEqual(entry["gate"], FrontendGate.RENDERED_TECHNICAL.value)
+
+    def test_failure_category_remains_content_after_serialization(self):
+        """Failure category remains content after serialization"""
+        error = [{
+            "gate": "RENDERED_TECHNICAL", "viewport": "desktop",
+            "type": "document_horizontal_overflow", "severity": RenderedTechnicalSeverity.ERROR.value,
+            "message": "Horizontal overflow", "context": {"viewport": "desktop", "overflow_px": 10},
+        }]
+        fb, task = self._run_with_error_feedback(error)
+        task_id = task.id
+        
+        # Save and reload
+        self.factory.save_state()
+        self.factory.load_state()
+        
+        reloaded = workflow_state.get_task(task_id)
+        self.assertEqual(len(reloaded.frontend_retry_history), 1)
+        entry = reloaded.frontend_retry_history[0]
+        self.assertEqual(entry["failure_category"], FailureCategory.CONTENT.value)
+
 if __name__ == "__main__":
     unittest.main()

@@ -678,3 +678,142 @@ class RenderedTechnicalResult:
             diagnostics=data.get("diagnostics", {}),
             created_at=data.get("created_at", datetime.datetime.now().isoformat()),
         )
+
+
+# ==================== Phase 7D-3A: Visual Quality Contracts ====================
+
+class VisualQualityAction(str, Enum):
+    """Visual quality review action.
+    
+    These are governance outcomes, NOT retry/regeneration triggers.
+    PASS = acceptable for publish
+    WARN = visual imperfections but acceptable for existing governance flow
+    HUMAN_REVIEW = materially concerning, human must review before publishing
+    
+    IMPORTANT: These values NEVER directly trigger:
+    - RETRY
+    - REGENERATE
+    - FAIL
+    """
+    PASS = "pass"
+    WARN = "warn"
+    HUMAN_REVIEW = "human_review"
+
+
+class VisualIssueCategory(str, Enum):
+    """Visual issue categories v1.
+    
+    Intentionally small set for v1.
+    """
+    LAYOUT = "layout"
+    RESPONSIVE = "responsive"
+    TYPOGRAPHY = "typography"
+    SPACING = "spacing"
+    VISUAL_HIERARCHY = "visual_hierarchy"
+    IMAGE = "image"
+    CTA = "cta"
+    BRAND_CONSISTENCY = "brand_consistency"
+    OTHER = "other"
+
+
+class VisualIssueSeverity(str, Enum):
+    """Visual issue severity levels.
+    
+    Severity is descriptive only.
+    MUST NOT trigger retry.
+    No visual retry mechanism in Phase 7D-3.
+    """
+    INFO = "info"
+    WARNING = "warning"
+    MAJOR = "major"
+
+
+@dataclass
+class VisualQualityIssue:
+    """A single visual quality issue.
+    
+    Serialization-ready dataclass for visual quality findings.
+    """
+    category: VisualIssueCategory
+    severity: VisualIssueSeverity
+    viewport: Optional[str] = None  # desktop, mobile, cross_viewport, None
+    message: str = ""
+    evidence: Optional[str] = None  # Short human-readable visual evidence
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "category": self.category.value if isinstance(self.category, VisualIssueCategory) else self.category,
+            "severity": self.severity.value if isinstance(self.severity, VisualIssueSeverity) else self.severity,
+            "viewport": self.viewport,
+            "message": self.message,
+            "evidence": self.evidence,
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "VisualQualityIssue":
+        category = data.get("category", VisualIssueCategory.OTHER.value)
+        if isinstance(category, str):
+            category = VisualIssueCategory(category)
+        
+        severity = data.get("severity", VisualIssueSeverity.INFO.value)
+        if isinstance(severity, str):
+            severity = VisualIssueSeverity(severity)
+        
+        return cls(
+            category=category,
+            severity=severity,
+            viewport=data.get("viewport"),
+            message=data.get("message", ""),
+            evidence=data.get("evidence"),
+        )
+
+
+@dataclass
+class VisualQualityResult:
+    """Result from VisualQualityReviewer.
+    
+    Visual quality is NOT a deterministic technical gate.
+    The reviewer classifies: PASS, WARN, HUMAN_REVIEW
+    
+    NEVER directly returns: RETRY, REGENERATE, FAIL
+    
+    HUMAN_REVIEW is governance escalation.
+    It is NOT frontend retry.
+    It is NOT failure.
+    It is NOT regeneration.
+    """
+    action: VisualQualityAction
+    summary: str
+    issues: List[VisualQualityIssue] = field(default_factory=list)
+    reviewed_viewports: List[str] = field(default_factory=list)
+    reviewer: Optional[str] = None
+    reviewed_at: str = field(default_factory=lambda: datetime.datetime.now().isoformat())
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "action": self.action.value if isinstance(self.action, VisualQualityAction) else self.action,
+            "summary": self.summary,
+            "issues": [issue.to_dict() for issue in self.issues],
+            "reviewed_viewports": self.reviewed_viewports,
+            "reviewer": self.reviewer,
+            "reviewed_at": self.reviewed_at,
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "VisualQualityResult":
+        action = data.get("action", VisualQualityAction.PASS.value)
+        if isinstance(action, str):
+            action = VisualQualityAction(action)
+        
+        issues = []
+        for issue_data in data.get("issues", []):
+            issues.append(VisualQualityIssue.from_dict(issue_data))
+        
+        return cls(
+            action=action,
+            summary=data.get("summary", ""),
+            issues=issues,
+            reviewed_viewports=data.get("reviewed_viewports", []),
+            reviewer=data.get("reviewer"),
+            reviewed_at=data.get("reviewed_at", datetime.datetime.now().isoformat()),
+        )

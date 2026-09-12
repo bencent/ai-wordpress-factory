@@ -1,15 +1,15 @@
 {
   "tasks": {
-    "b9a8ed7b-7770-4cc1-9898-ff15daa001fe": {
-      "id": "b9a8ed7b-7770-4cc1-9898-ff15daa001fe",
+    "4499268e-b6b9-4dd3-807b-b9a28b6b6d0e": {
+      "id": "4499268e-b6b9-4dd3-807b-b9a28b6b6d0e",
       "title": "Test Blog Post",
       "description": null,
       "content_type": "BLOG_POST",
       "status": "LEARNING",
       "priority": 0,
-      "created_at": "2026-09-12T02:02:27.428884",
-      "updated_at": "2026-09-12T02:02:30.563269",
-      "completed_at": "2026-09-12T02:02:30.563263",
+      "created_at": "2026-09-12T13:59:57.012218",
+      "updated_at": "2026-09-12T13:59:59.687522",
+      "completed_at": "2026-09-12T13:59:59.687517",
       "error_message": null,
       "plan": {
         "outline": [
@@ -54,7 +54,7 @@
       ],
       "learning_proposals": [],
       "frontend_request": {
-        "task_id": "b9a8ed7b-7770-4cc1-9898-ff15daa001fe",
+        "task_id": "4499268e-b6b9-4dd3-807b-b9a28b6b6d0e",
         "content_type": "BLOG_POST",
         "frontend_scope": "page",
         "animation_required": false,
@@ -69,7 +69,7 @@
         "metadata": {}
       },
       "frontend_result": {
-        "task_id": "b9a8ed7b-7770-4cc1-9898-ff15daa001fe",
+        "task_id": "4499268e-b6b9-4dd3-807b-b9a28b6b6d0e",
         "success": true,
         "html": "<!-- wp:paragraph --><p>Test</p><!-- /wp:paragraph -->",
         "css": "body { color: red; }",
@@ -83,7 +83,7 @@
         "metadata": {}
       },
       "frontend_security_result": {
-        "task_id": "b9a8ed7b-7770-4cc1-9898-ff15daa001fe",
+        "task_id": "4499268e-b6b9-4dd3-807b-b9a28b6b6d0e",
         "passed": true,
         "html": "<html><body><div>Test</div></body></html>",
         "css": "body { color: red; }",
@@ -93,7 +93,7 @@
         "blocked_items": []
       },
       "frontend_conversion_result": {
-        "task_id": "b9a8ed7b-7770-4cc1-9898-ff15daa001fe",
+        "task_id": "4499268e-b6b9-4dd3-807b-b9a28b6b6d0e",
         "success": true,
         "blocks": "<!-- wp:paragraph --><p>Test</p><!-- /wp:paragraph -->",
         "errors": [],
@@ -101,7 +101,7 @@
         "conversion_metadata": {}
       },
       "frontend_validation_result": {
-        "task_id": "b9a8ed7b-7770-4cc1-9898-ff15daa001fe",
+        "task_id": "4499268e-b6b9-4dd3-807b-b9a28b6b6d0e",
         "passed": true,
         "validation_status": "passed",
         "errors": [],
@@ -149,7 +149,7 @@
           "error": "Missing WordPress block comments",
           "feedback": "Frontend validation failed. Errors: Missing WordPress block comments. Please fix HTML structure (unclosed tags), CSS syntax (unmatched braces), JavaScript syntax (parseable by Node.js), and WordPress block format (balanced wp: comments with valid JSON attributes).",
           "action": "FRONTEND_REGENERATE",
-          "timestamp": "2026-09-12T02:02:27.432627",
+          "timestamp": "2026-09-12T13:59:57.016016",
           "details": {
             "validation_errors": [
               "Missing WordPress block comments"
@@ -178,13 +178,13 @@
       "approval_decision": null,
       "preview_history": [
         {
-          "task_id": "b9a8ed7b-7770-4cc1-9898-ff15daa001fe",
-          "preview_id": "4c72d5f3",
+          "task_id": "4499268e-b6b9-4dd3-807b-b9a28b6b6d0e",
+          "preview_id": "a2c6e69f",
           "attempt_number": 2,
-          "desktop_viewport_screenshot_path": "artifacts\\previews\\b9a8ed7b-7770-4cc1-9898-ff15daa001fe\\attempt-2\\4c72d5f3\\desktop-viewport.png",
-          "desktop_full_page_screenshot_path": "artifacts\\previews\\b9a8ed7b-7770-4cc1-9898-ff15daa001fe\\attempt-2\\4c72d5f3\\desktop-full.png",
-          "mobile_viewport_screenshot_path": "artifacts\\previews\\b9a8ed7b-7770-4cc1-9898-ff15daa001fe\\attempt-2\\4c72d5f3\\mobile-viewport.png",
-          "mobile_full_page_screenshot_path": "artifacts\\previews\\b9a8ed7b-7770-4cc1-9898-ff15daa001fe\\attempt-2\\4c72d5f3\\mobile-full.png",
+          "desktop_viewport_screenshot_path": "artifacts\\previews\\4499268e-b6b9-4dd3-807b-b9a28b6b6d0e\\attempt-2\\a2c6e69f\\desktop-viewport.png",
+          "desktop_full_page_screenshot_path": "artifacts\\previews\\4499268e-b6b9-4dd3-807b-b9a28b6b6d0e\\attempt-2\\a2c6e69f\\desktop-full.png",
+          "mobile_viewport_screenshot_path": "artifacts\\previews\\4499268e-b6b9-4dd3-807b-b9a28b6b6d0e\\attempt-2\\a2c6e69f\\mobile-viewport.png",
+          "mobile_full_page_screenshot_path": "artifacts\\previews\\4499268e-b6b9-4dd3-807b-b9a28b6b6d0e\\attempt-2\\a2c6e69f\\mobile-full.png",
           "desktop_viewport": {
             "width": 1440,
             "height": 900
@@ -193,12 +193,12 @@
             "width": 390,
             "height": 844
           },
-          "created_at": "2026-09-12T02:02:30.562263"
+          "created_at": "2026-09-12T13:59:59.686868"
         }
       ],
       "rendered_technical_result": {
-        "task_id": "b9a8ed7b-7770-4cc1-9898-ff15daa001fe",
-        "preview_id": "4c72d5f3",
+        "task_id": "4499268e-b6b9-4dd3-807b-b9a28b6b6d0e",
+        "preview_id": "a2c6e69f",
         "attempt_number": 2,
         "passed": true,
         "validation_status": "passed",
@@ -212,12 +212,12 @@
             "mobile"
           ]
         },
-        "created_at": "2026-09-12T02:02:30.562298"
+        "created_at": "2026-09-12T13:59:59.686890"
       },
       "rendered_technical_history": [
         {
-          "task_id": "b9a8ed7b-7770-4cc1-9898-ff15daa001fe",
-          "preview_id": "4c72d5f3",
+          "task_id": "4499268e-b6b9-4dd3-807b-b9a28b6b6d0e",
+          "preview_id": "a2c6e69f",
           "attempt_number": 2,
           "passed": true,
           "validation_status": "passed",
@@ -231,11 +231,11 @@
               "mobile"
             ]
           },
-          "created_at": "2026-09-12T02:02:30.562298"
+          "created_at": "2026-09-12T13:59:59.686890"
         }
       ]
     }
   },
-  "current_task_id": "b9a8ed7b-7770-4cc1-9898-ff15daa001fe",
+  "current_task_id": "4499268e-b6b9-4dd3-807b-b9a28b6b6d0e",
   "global_state": {}
 }
