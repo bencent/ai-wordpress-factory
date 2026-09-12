@@ -218,6 +218,7 @@ class FrontendGate(str, Enum):
     FRONTEND_CONVERSION = "FRONTEND_CONVERSION"
     FRONTEND_VALIDATION = "FRONTEND_VALIDATION"
     FRONTEND_PRODUCTION_QUALITY = "FRONTEND_PRODUCTION_QUALITY"
+    RENDERED_TECHNICAL = "RENDERED_TECHNICAL"
 
 
 class FrontendFailureSeverity(str, Enum):
@@ -537,4 +538,143 @@ class PreviewInfrastructureFailure:
             retryable=data.get("retryable", True),
             occurred_at=data.get("occurred_at", datetime.datetime.now().isoformat()),
             failure_category=failure_category,
+        )
+
+
+# ==================== Phase 7D-2: Rendered Technical Validator ====================
+
+@dataclass
+class ViewportRenderedEvidence:
+    """Rendered evidence collected for a single viewport."""
+    viewport_width: int
+    viewport_height: int
+    document_scroll_width: int
+    document_client_width: int
+    document_scroll_height: int
+    document_client_height: int
+    console_errors: List[Dict[str, Any]]
+    page_errors: List[Dict[str, Any]]
+    image_load_states: List[Dict[str, Any]]
+    element_bounding_boxes: List[Dict[str, Any]]
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "viewport_width": self.viewport_width,
+            "viewport_height": self.viewport_height,
+            "document_scroll_width": self.document_scroll_width,
+            "document_client_width": self.document_client_width,
+            "document_scroll_height": self.document_scroll_height,
+            "document_client_height": self.document_client_height,
+            "console_errors": self.console_errors,
+            "page_errors": self.page_errors,
+            "image_load_states": self.image_load_states,
+            "element_bounding_boxes": self.element_bounding_boxes,
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ViewportRenderedEvidence":
+        return cls(
+            viewport_width=data.get("viewport_width", 0),
+            viewport_height=data.get("viewport_height", 0),
+            document_scroll_width=data.get("document_scroll_width", 0),
+            document_client_width=data.get("document_client_width", 0),
+            document_scroll_height=data.get("document_scroll_height", 0),
+            document_client_height=data.get("document_client_height", 0),
+            console_errors=data.get("console_errors", []),
+            page_errors=data.get("page_errors", []),
+            image_load_states=data.get("image_load_states", []),
+            element_bounding_boxes=data.get("element_bounding_boxes", []),
+        )
+
+
+@dataclass
+class RenderedEvidence:
+    """Deterministic browser-rendered evidence for technical validation.
+    
+    Collected by PreviewRenderer during preview capture.
+    Contains only measurements needed for deterministic checks.
+    Does NOT contain full DOM dumps.
+    """
+    task_id: str
+    preview_id: str
+    attempt_number: int
+    desktop: ViewportRenderedEvidence
+    mobile: ViewportRenderedEvidence
+    created_at: str
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "task_id": self.task_id,
+            "preview_id": self.preview_id,
+            "attempt_number": self.attempt_number,
+            "desktop": self.desktop.to_dict(),
+            "mobile": self.mobile.to_dict(),
+            "created_at": self.created_at,
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "RenderedEvidence":
+        return cls(
+            task_id=data.get("task_id", ""),
+            preview_id=data.get("preview_id", ""),
+            attempt_number=data.get("attempt_number", 1),
+            desktop=ViewportRenderedEvidence.from_dict(data.get("desktop", {})),
+            mobile=ViewportRenderedEvidence.from_dict(data.get("mobile", {})),
+            created_at=data.get("created_at", datetime.datetime.now().isoformat()),
+        )
+
+
+class RenderedTechnicalGate(str, Enum):
+    """Rendered technical validator gate identifier."""
+    RENDERED_TECHNICAL = "RENDERED_TECHNICAL"
+
+
+class RenderedTechnicalSeverity(str, Enum):
+    """Severity levels for rendered technical diagnostics."""
+    ERROR = "error"
+    WARNING = "warning"
+
+
+@dataclass
+class RenderedTechnicalResult:
+    """Result from RenderedTechnicalValidator deterministic checks.
+    
+    Determines if browser-rendered page has technical defects.
+    ERROR diagnostics fail the gate. WARNING diagnostics do not.
+    """
+    task_id: str
+    preview_id: str
+    attempt_number: int
+    passed: bool
+    validation_status: str  # "passed", "failed", "warnings"
+    errors: List[Dict[str, Any]]
+    warnings: List[Dict[str, Any]]
+    diagnostics: Dict[str, Any]
+    created_at: str
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "task_id": self.task_id,
+            "preview_id": self.preview_id,
+            "attempt_number": self.attempt_number,
+            "passed": self.passed,
+            "validation_status": self.validation_status,
+            "errors": self.errors,
+            "warnings": self.warnings,
+            "diagnostics": self.diagnostics,
+            "created_at": self.created_at,
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "RenderedTechnicalResult":
+        return cls(
+            task_id=data.get("task_id", ""),
+            preview_id=data.get("preview_id", ""),
+            attempt_number=data.get("attempt_number", 1),
+            passed=data.get("passed", False),
+            validation_status=data.get("validation_status", "failed"),
+            errors=data.get("errors", []),
+            warnings=data.get("warnings", []),
+            diagnostics=data.get("diagnostics", {}),
+            created_at=data.get("created_at", datetime.datetime.now().isoformat()),
         )

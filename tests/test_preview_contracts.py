@@ -277,8 +277,17 @@ class TestPreviewRenderer(unittest.TestCase):
                 Path(path).write_bytes(b"fake png data")
             
             mock_page.screenshot.side_effect = mock_screenshot
+            # Mock page.evaluate to return evidence data
+            mock_page.evaluate.return_value = {
+                "document_scroll_width": 1440,
+                "document_client_width": 1440,
+                "document_scroll_height": 2000,
+                "document_client_height": 900,
+                "image_states": [],
+                "element_bounding_boxes": [],
+            }
             
-            artifact = self.renderer._render_with_browser(
+            artifact, evidence = self.renderer._render_with_browser(
                 task_id="task-123",
                 preview_id="preview-456",
                 attempt_number=1,
@@ -310,6 +319,12 @@ class TestPreviewRenderer(unittest.TestCase):
             
             # Verify attempt_number
             self.assertEqual(artifact.attempt_number, 1)
+            
+            # Verify evidence was returned
+            self.assertIsNotNone(evidence)
+            self.assertEqual(evidence.task_id, "task-123")
+            self.assertEqual(evidence.preview_id, "preview-456")
+            self.assertEqual(evidence.attempt_number, 1)
 
     @patch('playwright.sync_api.sync_playwright')
     def test_render_infrastructure_failure_browser_launch(self, mock_sync_playwright):
@@ -365,6 +380,16 @@ class TestPreviewRenderer(unittest.TestCase):
             pass  # Don't create file
         
         mock_page.screenshot.side_effect = mock_screenshot_fail
+        
+        # Mock evaluate for evidence collection
+        mock_page.evaluate.return_value = {
+            "document_scroll_width": 1440,
+            "document_client_width": 1440,
+            "document_scroll_height": 100,
+            "document_client_height": 900,
+            "image_states": [],
+            "element_bounding_boxes": [],
+        }
         
         frontend_result = FrontendResult(
             task_id="task-123",

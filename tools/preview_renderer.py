@@ -1,11 +1,15 @@
 """PreviewRenderer: Browser-based frontend preview rendering tool.
-
+ 
 Renders validated frontend artifacts in a real browser (Chromium via Playwright)
 and captures four screenshots per preview:
 - Desktop viewport (1440x900)
 - Desktop full-page
 - Mobile viewport (390x844)
 - Mobile full-page
+
+Phase 7D-2A: Also collects deterministic browser-rendered evidence
+(document measurements, page errors, console errors, image load states,
+element bounding boxes) alongside the PreviewArtifact.
 
 This is a deterministic infrastructure tool - it does NOT judge visual quality,
 call LLMs, or make routing decisions.
@@ -23,7 +27,7 @@ from enum import Enum
 
 from contracts import (
     PreviewArtifact, PreviewViewport, PreviewInfrastructureFailure,
-    FailureCategory, FrontendResult
+    FailureCategory, FrontendResult, RenderedEvidence, ViewportRenderedEvidence
 )
 from . import BaseTool
 
@@ -82,7 +86,7 @@ class PreviewRenderer(BaseTool):
         frontend_result: FrontendResult,
         attempt_number: int,
         preview_id: Optional[str] = None,
-    ) -> Tuple[Optional[PreviewArtifact], Optional[PreviewInfrastructureFailure]]:
+    ) -> Tuple[Optional[PreviewArtifact], Optional[PreviewInfrastructureFailure], Optional[RenderedEvidence]]:
         """Render frontend artifact and capture preview screenshots.
         
         Args:
@@ -92,8 +96,10 @@ class PreviewRenderer(BaseTool):
             preview_id: Optional preview ID (generated if not provided)
             
         Returns:
-            Tuple of (PreviewArtifact on success, PreviewInfrastructureFailure on failure)
-            Exactly one will be non-None.
+            Tuple of (PreviewArtifact, PreviewInfrastructureFailure, RenderedEvidence)
+            Exactly one of the first two will be non-None.
+            On success, RenderedEvidence is also non-None.
+            On failure, RenderedEvidence is None.
         """
         if preview_id is None:
             preview_id = str(uuid.uuid4())[:8]
@@ -107,14 +113,14 @@ class PreviewRenderer(BaseTool):
         # Render with browser (with infrastructure retry)
         for infra_attempt in range(self.MAX_INFRA_RETRIES + 1):
             try:
-                artifact = self._render_with_browser(
+                artifact, evidence = self._render_with_browser(
                     task_id=task_id,
                     preview_id=preview_id,
                     attempt_number=attempt_number,
                     html_path=html_path,
                     preview_dir=preview_dir,
                 )
-                return artifact, None
+                return artifact, None, evidence
                 
             except PreviewRenderError as e:
                 # Check if we should retry
@@ -133,7 +139,7 @@ class PreviewRenderer(BaseTool):
                     occurred_at=datetime.datetime.now().isoformat(),
                     failure_category=FailureCategory.INFRASTRUCTURE,
                 )
-                return None, failure
+                return None, failure, None
                 
             except Exception as e:
                 # Unexpected error - treat as infrastructure failure
@@ -151,7 +157,7 @@ class PreviewRenderer(BaseTool):
                     occurred_at=datetime.datetime.now().isoformat(),
                     failure_category=FailureCategory.INFRASTRUCTURE,
                 )
-                return None, failure
+                return None, failure, None
     
     def _create_preview_directory(
         self, 
@@ -225,10 +231,12 @@ class PreviewRenderer(BaseTool):
         attempt_number: int,
         html_path: Path,
         preview_dir: Path,
-    ) -> PreviewArtifact:
-        """Render HTML in browser and capture four screenshots.
+    ) -> Tuple[PreviewArtifact, RenderedEvidence]:
+        """Render HTML in browser, capture four screenshots, and collect rendered evidence.
         
-        Uses Playwright synchronous API for simplicity.
+        Uses Playwright synchronous API for browser interaction.
+        Returns (PreviewArtifact, RenderedEvidence) on success.
+        Raises PreviewRenderError on infrastructure failure.
         """
         from playwright.sync_api import sync_playwright
         
@@ -238,6 +246,57 @@ class PreviewRenderer(BaseTool):
         mobile_viewport_path = preview_dir / "mobile-viewport.png"
         mobile_full_path = preview_dir / "mobile-full.png"
         
+        # Evidence collection containers (page-level, not per-viewport)
+        page_errors = []
+        console_errors = []
+        
+        # JavaScript to collect per-viewport evidence
+        evidence_js = """() => {
+            const doc = document.documentElement;
+            const images = Array.from(document.querySelectorAll('img'));
+            const image_states = images.map(img => ({
+                src: img.currentSrc || img.src || '',
+                complete: img.complete,
+                natural_width: img.naturalWidth,
+                natural_height: img.naturalHeight
+            }));
+            
+            const target_selectors = ['main', 'section', 'article', 'button', 'a[href]', 'input[type="submit"]', 'img'];
+            const element_bboxes = [];
+            for (const selector of target_selectors) {
+                const elem = document.querySelector(selector);
+                if (elem) {
+                    const box = elem.getBoundingClientRect();
+                    if (elem.ownerDocument === document) {
+                        const cs = window.getComputedStyle(elem);
+                        element_bboxes.push({
+                            selector: selector,
+                            tag: elem.tagName.toLowerCase(),
+                            width: Math.round(box.width),
+                            height: Math.round(box.height),
+                            scroll_width: elem.scrollWidth,
+                            client_width: elem.clientWidth,
+                            scroll_height: elem.scrollHeight,
+                            client_height: elem.clientHeight,
+                            overflow_x: cs.overflowX,
+                            overflow_y: cs.overflowY,
+                            visibility: cs.visibility,
+                            display: cs.display
+                        });
+                    }
+                }
+            }
+            
+            return {
+                document_scroll_width: doc.scrollWidth,
+                document_client_width: doc.clientWidth,
+                document_scroll_height: doc.scrollHeight,
+                document_client_height: doc.clientHeight,
+                image_states: image_states,
+                element_bounding_boxes: element_bboxes
+            };
+        }"""
+        
         try:
             with sync_playwright() as p:
                 browser = p.chromium.launch(headless=self.browser_headless)
@@ -246,6 +305,29 @@ class PreviewRenderer(BaseTool):
                 try:
                     page = context.new_page()
                     page.set_default_timeout(self.page_load_timeout_ms)
+                    
+                    # Set up page error listener (JS exceptions)
+                    def on_page_error(exc):
+                        page_errors.append({
+                            "type": "pageerror",
+                            "message": str(exc),
+                            "location": {"url": "", "line": 0, "column": 0},
+                        })
+                    page.on("pageerror", on_page_error)
+                    
+                    # Set up console error listener (error-level console messages only)
+                    def on_console(msg):
+                        if msg.type == "error":
+                            console_errors.append({
+                                "type": "console_error",
+                                "message": msg.text,
+                                "location": {
+                                    "url": msg.location.get("url", "") if msg.location else "",
+                                    "line": msg.location.get("line", 0) if msg.location else 0,
+                                    "column": msg.location.get("column", 0) if msg.location else 0,
+                                },
+                            })
+                    page.on("console", on_console)
                     
                     # Load the local HTML file
                     file_url = html_path.resolve().as_uri()
@@ -264,6 +346,9 @@ class PreviewRenderer(BaseTool):
                     # Desktop full-page screenshot
                     page.screenshot(path=str(desktop_full_path), full_page=True)
                     
+                    # Collect desktop evidence after screenshots
+                    desktop_data = page.evaluate(evidence_js)
+                    
                     # === MOBILE (390x844) ===
                     page.set_viewport_size({"width": self.MOBILE_WIDTH, "height": self.MOBILE_HEIGHT})
                     page.wait_for_timeout(500)  # Allow layout to settle
@@ -273,6 +358,9 @@ class PreviewRenderer(BaseTool):
                     
                     # Mobile full-page screenshot
                     page.screenshot(path=str(mobile_full_path), full_page=True)
+                    
+                    # Collect mobile evidence after screenshots
+                    mobile_data = page.evaluate(evidence_js)
                     
                 finally:
                     context.close()
@@ -311,7 +399,43 @@ class PreviewRenderer(BaseTool):
             created_at=datetime.datetime.now().isoformat(),
         )
         
-        return artifact
+        # Build RenderedEvidence from collected browser data
+        desktop_evidence = ViewportRenderedEvidence(
+            viewport_width=self.DESKTOP_WIDTH,
+            viewport_height=self.DESKTOP_HEIGHT,
+            document_scroll_width=desktop_data.get("document_scroll_width", 0),
+            document_client_width=desktop_data.get("document_client_width", 0),
+            document_scroll_height=desktop_data.get("document_scroll_height", 0),
+            document_client_height=desktop_data.get("document_client_height", 0),
+            console_errors=list(console_errors),
+            page_errors=list(page_errors),
+            image_load_states=desktop_data.get("image_states", []),
+            element_bounding_boxes=desktop_data.get("element_bounding_boxes", []),
+        )
+        
+        mobile_evidence = ViewportRenderedEvidence(
+            viewport_width=self.MOBILE_WIDTH,
+            viewport_height=self.MOBILE_HEIGHT,
+            document_scroll_width=mobile_data.get("document_scroll_width", 0),
+            document_client_width=mobile_data.get("document_client_width", 0),
+            document_scroll_height=mobile_data.get("document_scroll_height", 0),
+            document_client_height=mobile_data.get("document_client_height", 0),
+            console_errors=list(console_errors),
+            page_errors=list(page_errors),
+            image_load_states=mobile_data.get("image_states", []),
+            element_bounding_boxes=mobile_data.get("element_bounding_boxes", []),
+        )
+        
+        evidence = RenderedEvidence(
+            task_id=task_id,
+            preview_id=preview_id,
+            attempt_number=attempt_number,
+            desktop=desktop_evidence,
+            mobile=mobile_evidence,
+            created_at=datetime.datetime.now().isoformat(),
+        )
+        
+        return artifact, evidence
 
 
 def render_preview(
@@ -320,7 +444,7 @@ def render_preview(
     attempt_number: int,
     config=None,
     preview_id: Optional[str] = None,
-) -> Tuple[Optional[PreviewArtifact], Optional[PreviewInfrastructureFailure]]:
+) -> Tuple[Optional[PreviewArtifact], Optional[PreviewInfrastructureFailure], Optional[RenderedEvidence]]:
     """Convenience function to render a preview."""
     renderer = PreviewRenderer(config or type('Config', (), {})())
     return renderer.render(task_id, frontend_result, attempt_number, preview_id)

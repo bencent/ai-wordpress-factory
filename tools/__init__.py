@@ -49,6 +49,7 @@ from .greenlight_converter import GreenLightConverter
 from .frontend_validator import FrontendValidator
 from .frontend_production_gate import FrontendProductionQualityGate
 from .preview_renderer import PreviewRenderer, PreviewRenderError, render_preview
+from .rendered_technical_validator import RenderedTechnicalValidator
 from .wordpress import WordPressPublisher
 
 __all__ = [
@@ -60,5 +61,6 @@ __all__ = [
     "PreviewRenderer",
     "PreviewRenderError",
     "render_preview",
+    "RenderedTechnicalValidator",
     "WordPressPublisher",
 ]

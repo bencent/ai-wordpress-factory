@@ -36,6 +36,7 @@ from tools.greenlight_converter import GreenLightConverter
 from tools.frontend_validator import FrontendValidator
 from tools.frontend_production_gate import FrontendProductionQualityGate
 from tools.preview_renderer import PreviewRenderer, PreviewRenderError
+from tools.rendered_technical_validator import RenderedTechnicalValidator
 
 # 配置日誌
 logging.basicConfig(
@@ -500,7 +501,7 @@ class AIWordPressFactory:
                 # attempt_number = frontend_retry_count + 1 (current attempt)
                 attempt_number = task.frontend_retry_count + 1
                 
-                preview_artifact, preview_failure = preview_renderer.render(
+                preview_artifact, preview_failure, rendered_evidence = preview_renderer.render(
                     task_id=task_id,
                     frontend_result=frontend_result,
                     attempt_number=attempt_number,
@@ -516,6 +517,11 @@ class AIWordPressFactory:
                     task.final_failed_gate = "PREVIEW_RENDER"
                     task.final_error = f"Preview infrastructure failure: {preview_failure.error_type}: {preview_failure.message}"
                     task.final_feedback = "Browser/render infrastructure failure. Frontend content passed all quality gates."
+                    task.final_failure_category = (
+                        preview_failure.failure_category.value
+                        if isinstance(preview_failure.failure_category, FailureCategory)
+                        else preview_failure.failure_category
+                    )
                     task.failure_timestamp = datetime.datetime.now().isoformat()
                     
                     workflow_state.update_task_status(
@@ -548,6 +554,71 @@ class AIWordPressFactory:
                     f"desktop_viewport={preview_artifact.desktop_viewport_screenshot_path}, "
                     f"mobile_viewport={preview_artifact.mobile_viewport_screenshot_path}"
                 )
+                
+                # Phase 7D-2B: Rendered Technical Validation
+                workflow_state.update_task_status(
+                    task_id,
+                    TaskStatus.FRONTEND_RENDERED_TECHNICAL_CHECK,
+                )
+                rendered_technical_validator = RenderedTechnicalValidator(config)
+                rendered_technical_result = rendered_technical_validator.validate(
+                    rendered_evidence
+                )
+                task.rendered_technical_result = rendered_technical_result.to_dict()
+                task.rendered_technical_history.append(rendered_technical_result.to_dict())
+                
+                logger.info(
+                    f"任務 {task_id} 渲染技術檢查完成: "
+                    f"passed={rendered_technical_result.passed}, "
+                    f"status={rendered_technical_result.validation_status}, "
+                    f"errors={len(rendered_technical_result.errors)}, "
+                    f"warnings={len(rendered_technical_result.warnings)}"
+                )
+                
+                if not rendered_technical_result.passed:
+                    feedback = self._create_frontend_failure_feedback(
+                        gate=FrontendGate.RENDERED_TECHNICAL,
+                        result=rendered_technical_result,
+                        attempt=attempt_number,
+                    )
+                    self._record_frontend_retry(task, feedback)
+                    task.frontend_retry_count += 1
+                    frontend_pipeline_passed = False
+                    
+                    logger.warning(
+                        "frontend_gate_failed",
+                        extra={
+                            "event": "frontend_gate_failed",
+                            "task_id": task_id,
+                            "attempt": attempt_number,
+                            "gate": "RENDERED_TECHNICAL",
+                            "status": "failed",
+                            "error": str(rendered_technical_result.errors)
+                            if rendered_technical_result.errors
+                            else "Rendered technical validation failed",
+                            "failure_category": FailureCategory.CONTENT.value,
+                        }
+                    )
+                    
+                    logger.warning(
+                        f"任務 {task_id} 渲染技術檢查失敗，重試次數: "
+                        f"{task.frontend_retry_count}/{task.max_frontend_retries}"
+                    )
+                    if task.frontend_retry_count >= task.max_frontend_retries:
+                        break
+                    
+                    frontend_result = self._regenerate_frontend_with_feedback(
+                        frontend_agent, frontend_request, feedback
+                    )
+                    if not frontend_result.success:
+                        workflow_state.update_task_status(
+                            task_id,
+                            TaskStatus.FAILED,
+                            error_message=f"Frontend regeneration failed: {frontend_result.errors}",
+                        )
+                        return False
+                    task.frontend_result = asdict(frontend_result)
+                    continue
                 
                 break
             
@@ -797,6 +868,57 @@ class AIWordPressFactory:
                 "warnings": warnings,
                 "input_html_preview": (getattr(result, 'html', '') or '')[:500] if hasattr(result, 'html') else "",
             }
+        elif gate == FrontendGate.RENDERED_TECHNICAL:
+            error_messages = []
+            for error in errors:
+                error_type = error.get("type", "rendered_technical_error")
+                context = error.get("context", {})
+                viewport = context.get("viewport", "unknown")
+                if error_type == "document_horizontal_overflow":
+                    scroll_width = context.get("scroll_width", 0)
+                    client_width = context.get("client_width", 0)
+                    overflow_px = context.get("overflow_px", scroll_width - client_width)
+                    message = (
+                        f"{viewport} viewport document width {scroll_width}px exceeds "
+                        f"client width {client_width}px by {overflow_px}px. Inspect "
+                        f"fixed-width elements and responsive container sizing."
+                    )
+                elif error_type == "broken_image":
+                    src = context.get("src", "<unknown>")
+                    complete = context.get("complete", False)
+                    natural_width = context.get("natural_width", 0)
+                    natural_height = context.get("natural_height")
+                    height_part = (
+                        f", naturalHeight={natural_height}" if natural_height is not None else ""
+                    )
+                    message = (
+                        f"Broken image detected in {viewport} viewport: src={src}, "
+                        f"complete={complete}, naturalWidth={natural_width}{height_part}."
+                    )
+                elif error_type == "page_runtime_error":
+                    runtime_message = context.get("message", error.get("message", "unknown error"))
+                    location = context.get("location", error.get("location", {}))
+                    location_part = ""
+                    if location:
+                        location_part = (
+                            f" at {location.get('url', '')}:"
+                            f"{location.get('line', 0)}:{location.get('column', 0)}"
+                        )
+                    message = f"Page runtime error in {viewport} preview: {runtime_message}{location_part}."
+                else:
+                    message = error.get("message", error_type)
+                error_messages.append(f"{error_type}: {message}")
+            
+            feedback = (
+                "Rendered technical validation failed. Fix the browser-rendered defects "
+                "and regenerate the frontend: " + "; ".join(error_messages) + " "
+                "Re-run the full frontend pipeline after fixing these issues."
+            )
+            details = {
+                "errors": errors,
+                "diagnostics": getattr(result, "diagnostics", {}),
+                "failure_category": FailureCategory.CONTENT.value,
+            }
         elif gate == FrontendGate.FRONTEND_PRODUCTION_QUALITY:
             feedback = (
                 f"Frontend production quality check failed. "
@@ -853,6 +975,9 @@ class AIWordPressFactory:
             "action": "FRONTEND_REGENERATE",
             "timestamp": feedback.timestamp,
             "details": feedback.details,
+            "failure_category": feedback.details.get(
+                "failure_category", FailureCategory.CONTENT.value
+            ),
         }
         task.frontend_retry_history.append(history_entry)
         
@@ -916,16 +1041,21 @@ class AIWordPressFactory:
         final_gate = None
         final_error = None
         final_feedback = None
+        final_failure_category = FailureCategory.CONTENT.value
         
         if task.frontend_retry_history:
             last_entry = task.frontend_retry_history[-1]
             final_gate = last_entry.get("gate")
             final_error = last_entry.get("error")
             final_feedback = last_entry.get("feedback")
+            final_failure_category = last_entry.get(
+                "failure_category", FailureCategory.CONTENT.value
+            )
         
         task.final_failed_gate = final_gate
         task.final_error = final_error
         task.final_feedback = final_feedback
+        task.final_failure_category = final_failure_category
         task.failure_timestamp = datetime.datetime.now().isoformat()
         
         workflow_state.update_task_status(

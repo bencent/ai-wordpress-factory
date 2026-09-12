@@ -28,6 +28,7 @@ class TaskStatus(Enum):
     FRONTEND_VALIDATING = auto()  # 前端驗證中
     FRONTEND_PRODUCTION_QUALITY_CHECK = auto()  # 前端生產品質檢查中
     FRONTEND_PREVIEW_RENDERING = auto()  # 前端預覽渲染中
+    FRONTEND_RENDERED_TECHNICAL_CHECK = auto()  # 前端渲染技術檢查中
     # Phase 7C-4: Approval workflow statuses
     AWAITING_APPROVAL = auto()  # 等待人工批准發布
     REJECTED_NEEDS_REVISION = auto()  # 人工拒絕，需要修訂
@@ -80,6 +81,7 @@ class Task:
     final_failed_gate: Optional[str] = None
     final_error: Optional[str] = None
     final_feedback: Optional[str] = None
+    final_failure_category: Optional[str] = None
     failure_timestamp: Optional[str] = None
     
     # 圖片相關
@@ -123,6 +125,10 @@ class Task:
     # latest_preview is derived from preview_history[-1] for backward compat
     # Use _latest_preview_legacy for deserialization of old state
     _latest_preview_legacy: Optional[Dict[str, Any]] = field(default=None, repr=False)
+    
+    # Phase 7D-2: Rendered technical validator fields
+    rendered_technical_result: Optional[Dict[str, Any]] = None
+    rendered_technical_history: List[Dict[str, Any]] = field(default_factory=list)
 
     @property
     def latest_preview(self) -> Optional[Dict[str, Any]]:
@@ -186,6 +192,7 @@ class Task:
             "final_failed_gate": self.final_failed_gate,
             "final_error": self.final_error,
             "final_feedback": self.final_feedback,
+            "final_failure_category": self.final_failure_category,
             "failure_timestamp": self.failure_timestamp,
             "wordpress_id": self.wordpress_id,
             "wordpress_url": self.wordpress_url,
@@ -197,6 +204,8 @@ class Task:
             "approval_feedback": self.approval_feedback,
             "approval_decision": self.approval_decision,
             "preview_history": self.preview_history,
+            "rendered_technical_result": self.rendered_technical_result,
+            "rendered_technical_history": self.rendered_technical_history,
         }
 
     @classmethod
@@ -251,6 +260,7 @@ class Task:
             final_failed_gate=data.get("final_failed_gate"),
             final_error=data.get("final_error"),
             final_feedback=data.get("final_feedback"),
+            final_failure_category=data.get("final_failure_category"),
             failure_timestamp=data.get("failure_timestamp"),
             wordpress_id=data.get("wordpress_id"),
             wordpress_url=data.get("wordpress_url"),
@@ -263,6 +273,8 @@ class Task:
             approval_decision=data.get("approval_decision"),
             preview_history=data.get("preview_history", []),
             _latest_preview_legacy=data.get("latest_preview"),
+            rendered_technical_result=data.get("rendered_technical_result"),
+            rendered_technical_history=data.get("rendered_technical_history", []),
         )
 
 
