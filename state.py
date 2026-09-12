@@ -29,6 +29,7 @@ class TaskStatus(Enum):
     FRONTEND_PRODUCTION_QUALITY_CHECK = auto()  # 前端生產品質檢查中
     FRONTEND_PREVIEW_RENDERING = auto()  # 前端預覽渲染中
     FRONTEND_RENDERED_TECHNICAL_CHECK = auto()  # 前端渲染技術檢查中
+    FRONTEND_VISUAL_REVIEW = auto()  # 前端視覺品質審查中
     # Phase 7C-4: Approval workflow statuses
     AWAITING_APPROVAL = auto()  # 等待人工批准發布
     REJECTED_NEEDS_REVISION = auto()  # 人工拒絕，需要修訂
@@ -130,6 +131,10 @@ class Task:
     rendered_technical_result: Optional[Dict[str, Any]] = None
     rendered_technical_history: List[Dict[str, Any]] = field(default_factory=list)
 
+    # Phase 7D-3C: Visual quality review fields
+    visual_quality_result: Optional[Dict[str, Any]] = None
+    visual_quality_history: List[Dict[str, Any]] = field(default_factory=list)
+
     @property
     def latest_preview(self) -> Optional[Dict[str, Any]]:
         """Derive latest preview from preview_history (durable source of truth).
@@ -206,6 +211,8 @@ class Task:
             "preview_history": self.preview_history,
             "rendered_technical_result": self.rendered_technical_result,
             "rendered_technical_history": self.rendered_technical_history,
+            "visual_quality_result": self.visual_quality_result,
+            "visual_quality_history": self.visual_quality_history,
         }
 
     @classmethod
@@ -275,6 +282,8 @@ class Task:
             _latest_preview_legacy=data.get("latest_preview"),
             rendered_technical_result=data.get("rendered_technical_result"),
             rendered_technical_history=data.get("rendered_technical_history", []),
+            visual_quality_result=data.get("visual_quality_result"),
+            visual_quality_history=data.get("visual_quality_history", []),
         )
 
 

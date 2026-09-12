@@ -26,11 +26,13 @@ from contracts import (
     ApprovalPolicyMode, ApprovalPolicy, ClientProfile,
     BrandProductionRules,
     PreviewArtifact, PreviewInfrastructureFailure, FailureCategory,
+    VisualQualityResult, VisualQualityAction,
 )
 from agents.quality_evaluator import QualityEvaluatorAgent
 from agents.content_fixer import ContentFixerAgent
 from agents.final_reviewer import FinalReviewerAgent
 from agents.frontend import FrontendAgent
+from agents.visual_quality import VisualQualityReviewer
 from tools.frontend_security import FrontendSecurityGate
 from tools.greenlight_converter import GreenLightConverter
 from tools.frontend_validator import FrontendValidator
@@ -513,7 +515,6 @@ class AIWordPressFactory:
                     # If we get here, retries are exhausted
                     
                     # Set final failure state for infrastructure failure
-                    import datetime
                     task.final_failed_gate = "PREVIEW_RENDER"
                     task.final_error = f"Preview infrastructure failure: {preview_failure.error_type}: {preview_failure.message}"
                     task.final_feedback = "Browser/render infrastructure failure. Frontend content passed all quality gates."
@@ -566,8 +567,12 @@ class AIWordPressFactory:
                 )
                 task.rendered_technical_result = rendered_technical_result.to_dict()
                 task.rendered_technical_history.append(rendered_technical_result.to_dict())
-                
+
+                if rendered_technical_result.passed:
+                    visual_quality_result = self._run_visual_quality_review(task, preview_artifact)
+
                 logger.info(
+
                     f"任務 {task_id} 渲染技術檢查完成: "
                     f"passed={rendered_technical_result.passed}, "
                     f"status={rendered_technical_result.validation_status}, "
@@ -621,8 +626,24 @@ class AIWordPressFactory:
                     continue
                 
                 break
-            
+
+            # Handle visual review HUMAN_REVIEW escalation
+            visual_action = None
+            if task.visual_quality_result:
+                visual_action = task.visual_quality_result.get("action")
+            if task.status == TaskStatus.FRONTEND_VISUAL_REVIEW and visual_action == VisualQualityAction.HUMAN_REVIEW.value:
+                approval_policy = self._resolve_approval_policy(task)
+                task.approval_policy = approval_policy.to_dict()
+                task.status = TaskStatus.AWAITING_APPROVAL
+                task.approval_status = "pending"
+                task.approval_requested_at = datetime.datetime.now().isoformat()
+                task.updated_at = datetime.datetime.now().isoformat()
+                logger.info(f"任務 {task_id} 視覺審查要求人工批准 (AWAITING_APPROVAL)")
+                self.save_state()
+                return False
+
             if not frontend_pipeline_passed:
+
                 # Retry exhausted - set final failure state
                 self._finalize_frontend_failure(task)
                 
@@ -656,7 +677,6 @@ class AIWordPressFactory:
                 return self._continue_post_approval(task_id)
             else:
                 # REQUIRE_HUMAN_REVIEW: enter AWAITING_APPROVAL
-                import datetime
                 task.status = TaskStatus.AWAITING_APPROVAL
                 task.approval_status = "pending"
                 task.approval_requested_at = datetime.datetime.now().isoformat()
@@ -1083,6 +1103,34 @@ class AIWordPressFactory:
                 "error": final_error or "Frontend pipeline failed after max retries",
             }
         )
+
+    def _run_visual_quality_review(
+        self,
+        task: Task,
+        preview_artifact: PreviewArtifact,
+    ) -> VisualQualityResult:
+        workflow_state.update_task_status(task.id, TaskStatus.FRONTEND_VISUAL_REVIEW)
+        try:
+            reviewer = VisualQualityReviewer(config)
+            result = reviewer.review(preview_artifact)
+            result_data = result.to_dict()
+        except Exception as exc:
+            result = VisualQualityResult(
+                action=VisualQualityAction.HUMAN_REVIEW,
+                summary=f"Visual review failed: {exc}",
+                issues=[],
+                reviewed_viewports=[],
+                reviewer="visual_quality_reviewer",
+            )
+            result_data = result.to_dict()
+
+        task.visual_quality_result = result_data
+        task.visual_quality_history.append(result_data)
+        logger.info(
+            f"任務 {task.id} 視覺品質審查完成: "
+            f"action={result.action.value if isinstance(result.action, VisualQualityAction) else result.action}"
+        )
+        return result
 
     def _resolve_approval_policy(self, task: Task) -> ApprovalPolicy:
         """Resolve the approval policy for a task.

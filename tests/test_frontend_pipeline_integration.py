@@ -12,7 +12,8 @@ from contracts import (
     ReviewResult, ReviewAction, CritiqueResult,
     ApprovalPolicy, ApprovalPolicyMode,
     BrandProductionRules, BrandProfile, ClientProfile,
-    PreviewArtifact
+    PreviewArtifact,
+    VisualQualityResult, VisualQualityAction,
 )
 from main import AIWordPressFactory
 
@@ -27,6 +28,18 @@ class TestFrontendPipelineIntegration(unittest.TestCase):
         from state import workflow_state
         workflow_state.tasks.clear()
         workflow_state.current_task_id = None
+
+        # Patch VisualQualityReviewer to always return PASS by default
+        self._visual_reviewer_patcher = patch("main.VisualQualityReviewer")
+        visual_mock = self._visual_reviewer_patcher.start()
+        visual_instance = Mock()
+        visual_instance.review.return_value = VisualQualityResult(
+            action=VisualQualityAction.PASS, summary="ok"
+        )
+        visual_mock.return_value = visual_instance
+
+    def tearDown(self):
+        self._visual_reviewer_patcher.stop()
 
     def _create_test_task(self, **kwargs) -> Task:
         """Create a test task and return it."""

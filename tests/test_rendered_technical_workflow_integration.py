@@ -19,6 +19,7 @@ from contracts import (
     PreviewArtifact, PreviewViewport, PreviewInfrastructureFailure, FailureCategory,
     RenderedEvidence, ViewportRenderedEvidence,
     RenderedTechnicalResult, RenderedTechnicalSeverity,
+    VisualQualityResult, VisualQualityAction,
 )
 from main import AIWordPressFactory
 
@@ -216,6 +217,12 @@ class TestRenderedTechnicalWorkflowIntegration(unittest.TestCase):
         production_mock = Mock()
         production_mock.check.return_value = _make_production_result(task_id)
 
+        visual_reviewer_mock = Mock()
+        visual_reviewer_mock.review.return_value = VisualQualityResult(
+            action=VisualQualityAction.PASS,
+            summary="Visual quality acceptable",
+        )
+
         with ExitStack() as stack:
             stack.enter_context(patch.object(self.factory, "_get_agent", side_effect=get_agent_side_effect))
             stack.enter_context(patch("main.FrontendSecurityGate", return_value=security_mock))
@@ -224,6 +231,7 @@ class TestRenderedTechnicalWorkflowIntegration(unittest.TestCase):
             stack.enter_context(patch("main.FrontendProductionQualityGate", return_value=production_mock))
             stack.enter_context(patch("main.PreviewRenderer", return_value=renderer_return))
             stack.enter_context(patch("main.RenderedTechnicalValidator", return_value=validator_result))
+            stack.enter_context(patch("main.VisualQualityReviewer", return_value=visual_reviewer_mock))
             stack.enter_context(patch.object(self.factory, "save_state"))
 
             return self.factory.run_workflow(task_id), task
@@ -770,6 +778,12 @@ class TestRenderedTechnicalWorkflowIntegration(unittest.TestCase):
         def get_agent_side_effect(agent_type):
             return agents.get(agent_type)
 
+        visual_reviewer_mock = Mock()
+        visual_reviewer_mock.review.return_value = VisualQualityResult(
+            action=VisualQualityAction.PASS,
+            summary="Visual quality acceptable",
+        )
+
         with ExitStack() as stack:
             stack.enter_context(patch.object(self.factory, "_get_agent", side_effect=get_agent_side_effect))
             stack.enter_context(patch("main.FrontendSecurityGate", return_value=security_mock))
@@ -778,6 +792,7 @@ class TestRenderedTechnicalWorkflowIntegration(unittest.TestCase):
             stack.enter_context(patch("main.FrontendProductionQualityGate", return_value=production_mock))
             stack.enter_context(patch("main.PreviewRenderer", return_value=renderer))
             stack.enter_context(patch("main.RenderedTechnicalValidator", return_value=rendered_validator))
+            stack.enter_context(patch("main.VisualQualityReviewer", return_value=visual_reviewer_mock))
             stack.enter_context(patch.object(self.factory, "save_state"))
 
             self.factory.run_workflow(task_id)
@@ -1275,6 +1290,12 @@ class TestRenderedTechnicalWorkflowIntegration(unittest.TestCase):
         production_mock = Mock()
         production_mock.check.return_value = _make_production_result(task_id)
 
+        visual_reviewer_mock = Mock()
+        visual_reviewer_mock.review.return_value = VisualQualityResult(
+            action=VisualQualityAction.PASS,
+            summary="Visual quality acceptable",
+        )
+
         with ExitStack() as stack:
             stack.enter_context(patch.object(self.factory, "_get_agent", side_effect=get_agent_side_effect))
             stack.enter_context(patch("main.FrontendSecurityGate", return_value=security_mock))
@@ -1283,6 +1304,7 @@ class TestRenderedTechnicalWorkflowIntegration(unittest.TestCase):
             stack.enter_context(patch("main.FrontendProductionQualityGate", return_value=production_mock))
             stack.enter_context(patch("main.PreviewRenderer", return_value=renderer))
             stack.enter_context(patch("main.RenderedTechnicalValidator", return_value=rendered_validator))
+            stack.enter_context(patch("main.VisualQualityReviewer", return_value=visual_reviewer_mock))
             stack.enter_context(patch.object(self.factory, "save_state"))
 
             self.factory.run_workflow(task_id)
@@ -1687,6 +1709,466 @@ class TestRenderedTechnicalWorkflowIntegration(unittest.TestCase):
         self.assertEqual(len(reloaded.frontend_retry_history), 1)
         entry = reloaded.frontend_retry_history[0]
         self.assertEqual(entry["failure_category"], FailureCategory.CONTENT.value)
+
+class TestVisualQualityWorkflowIntegration(unittest.TestCase):
+    def setUp(self):
+        self.factory = AIWordPressFactory()
+        workflow_state.tasks.clear()
+        workflow_state.current_task_id = None
+
+    def _create_task(self, approval_mode=ApprovalPolicyMode.AUTO_PUBLISH, max_frontend_retries=3):
+        task_id = self.factory.create_task(
+            title="Test Blog Post",
+            description="A test blog post",
+            content_type=ContentType.BLOG_POST,
+        )
+        task = workflow_state.get_task(task_id)
+        task.approval_policy = ApprovalPolicy(mode=approval_mode).to_dict()
+        task.max_frontend_retries = max_frontend_retries
+        task.frontend_retry_count = 0
+        task.frontend_retry_history = []
+        return task
+
+    def _run_visual_workflow(
+        self,
+        technical_result,
+        visual_result,
+        approval_mode=ApprovalPolicyMode.AUTO_PUBLISH,
+        max_frontend_retries=3,
+        preview_failure=None,
+    ):
+        """Run workflow with given technical and visual results.
+        Returns (workflow_result_bool, task, mocks_dict)."""
+        from unittest.mock import Mock, patch
+        from contextlib import ExitStack
+
+        task = self._create_task(approval_mode=approval_mode, max_frontend_retries=max_frontend_retries)
+        task_id = task.id
+
+        renderer = Mock()
+        if preview_failure:
+            artifact = None
+            rendered_evidence = None
+        else:
+            artifact = _make_preview_artifact(task_id=task_id)
+            rendered_evidence = _make_evidence(task_id=task_id)
+        renderer.render.return_value = (artifact, preview_failure, rendered_evidence)
+
+        technical_mock = Mock()
+        technical_mock.validate.return_value = technical_result
+
+        visual_reviewer = Mock()
+        visual_reviewer.review.return_value = visual_result
+
+        writer_mock = Mock()
+        writer_mock.write_content.return_value = "Test draft content"
+        quality_mock = Mock()
+        quality_mock.evaluate.return_value = ReviewResult(
+            passed=True, score=90, issues=[], feedback="Excellent",
+            suggested_action=ReviewAction.PUBLISH.value)
+        frontend_mock = Mock()
+        frontend_mock.generate_frontend.return_value = _make_frontend_result(task_id)
+        publisher_mock = Mock()
+        publisher_mock.publish_content.return_value = (123, "published-url")
+        publisher_mock.validate_config.return_value = True
+        image_mock = Mock()
+        image_mock.generate_hero_image.return_value = (None, None)
+        learner_mock = Mock()
+        learner_mock.analyze_review.return_value = {"學習提案": []}
+
+        agents = {
+            "writer": writer_mock,
+            "quality_evaluator": quality_mock,
+            "frontend": frontend_mock,
+            "publisher": publisher_mock,
+            "image": image_mock,
+            "learner": learner_mock,
+        }
+        def get_agent_side_effect(agent_type):
+            return agents.get(agent_type)
+
+        security_mock = Mock()
+        security_mock.check.return_value = _make_security_result(task_id)
+        converter_mock = Mock()
+        converter_mock.convert.return_value = _make_conversion_result(task_id)
+        validation_mock = Mock()
+        validation_mock.validate.return_value = _make_validation_result(task_id)
+        production_mock = Mock()
+        production_mock.check.return_value = _make_production_result(task_id)
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(self.factory, "_get_agent", side_effect=get_agent_side_effect))
+            stack.enter_context(patch("main.FrontendSecurityGate", return_value=security_mock))
+            stack.enter_context(patch("main.GreenLightConverter", return_value=converter_mock))
+            stack.enter_context(patch("main.FrontendValidator", return_value=validation_mock))
+            stack.enter_context(patch("main.FrontendProductionQualityGate", return_value=production_mock))
+            stack.enter_context(patch("main.PreviewRenderer", return_value=renderer))
+            stack.enter_context(patch("main.RenderedTechnicalValidator", return_value=technical_mock))
+            stack.enter_context(patch("main.VisualQualityReviewer", return_value=visual_reviewer))
+            stack.enter_context(patch.object(self.factory, "save_state"))
+
+            result = self.factory.run_workflow(task_id)
+
+        task = workflow_state.get_task(task_id)
+        mocks = {
+            "renderer": renderer,
+            "technical": technical_mock,
+            "reviewer": visual_reviewer,
+            "frontend_agent": frontend_mock,
+            "publisher": publisher_mock,
+            "image": image_mock,
+        }
+        return result, task, mocks
+
+    # VISUAL REVIEW EXECUTION
+    def test_rendered_pass_runs_visual_reviewer(self):
+        technical = _make_result(True, "passed")
+        visual = VisualQualityResult(action=VisualQualityAction.PASS, summary="ok")
+        result, task, mocks = self._run_visual_workflow(technical, visual)
+        self.assertTrue(mocks["reviewer"].review.called)
+        self.assertIsNotNone(task.visual_quality_result)
+
+    def test_rendered_warning_runs_visual_reviewer(self):
+        warning_diag = [{
+            "gate": "RENDERED_TECHNICAL", "viewport": "desktop",
+            "type": "element_overflow", "severity": RenderedTechnicalSeverity.WARNING.value,
+            "message": "Element overflow", "context": {"viewport": "desktop"},
+        }]
+        technical = _make_result(True, "warnings", warnings=warning_diag)
+        visual = VisualQualityResult(action=VisualQualityAction.PASS, summary="ok")
+        result, task, mocks = self._run_visual_workflow(technical, visual)
+        self.assertTrue(mocks["reviewer"].review.called)
+        self.assertIsNotNone(task.visual_quality_result)
+
+    def test_rendered_error_does_not_run_visual_reviewer(self):
+        error_diag = [{
+            "gate": "RENDERED_TECHNICAL", "viewport": "desktop",
+            "type": "document_horizontal_overflow", "severity": RenderedTechnicalSeverity.ERROR.value,
+            "message": "Horizontal overflow", "context": {"viewport": "desktop", "overflow_px": 10},
+        }]
+        technical = _make_result(False, "failed", errors=error_diag)
+        visual = VisualQualityResult(action=VisualQualityAction.PASS, summary="ok")
+        result, task, mocks = self._run_visual_workflow(technical, visual, max_frontend_retries=1)
+        self.assertFalse(mocks["reviewer"].review.called)
+        self.assertIsNone(task.visual_quality_result)
+        self.assertEqual(task.status, TaskStatus.FAILED_NEEDS_ATTENTION)
+
+    def test_infrastructure_failure_does_not_run_visual_reviewer(self):
+        failure = PreviewInfrastructureFailure(
+            task_id="task-123", preview_id="preview-456", attempt_number=1,
+            error_type="browser_crash", message="Browser crashed", retryable=False,
+            occurred_at=datetime.datetime.now().isoformat(), failure_category=FailureCategory.INFRASTRUCTURE,
+        )
+        technical = _make_result(True, "passed")
+        visual = VisualQualityResult(action=VisualQualityAction.PASS, summary="ok")
+        result, task, mocks = self._run_visual_workflow(technical, visual, preview_failure=failure)
+        self.assertFalse(mocks["reviewer"].review.called)
+        self.assertIsNone(task.visual_quality_result)
+        self.assertEqual(task.status, TaskStatus.FAILED_NEEDS_ATTENTION)
+
+    def test_existing_preview_artifact_passed_to_reviewer(self):
+        technical = _make_result(True, "passed")
+        visual = VisualQualityResult(action=VisualQualityAction.PASS, summary="ok")
+        result, task, mocks = self._run_visual_workflow(technical, visual)
+        called_arg = mocks["reviewer"].review.call_args[0][0]
+        self.assertIsInstance(called_arg, PreviewArtifact)
+        self.assertEqual(called_arg.task_id, task.id)
+
+    # PERSISTENCE
+    def test_visual_pass_result_persisted(self):
+        technical = _make_result(True, "passed")
+        visual = VisualQualityResult(action=VisualQualityAction.PASS, summary="Visual PASS")
+        result, task, _ = self._run_visual_workflow(technical, visual)
+        self.assertIsNotNone(task.visual_quality_result)
+        self.assertEqual(task.visual_quality_result["action"], "pass")
+        self.assertEqual(task.visual_quality_result["summary"], "Visual PASS")
+
+    def test_visual_warn_result_persisted(self):
+        technical = _make_result(True, "passed")
+        visual = VisualQualityResult(action=VisualQualityAction.WARN, summary="Visual WARN")
+        result, task, _ = self._run_visual_workflow(technical, visual)
+        self.assertIsNotNone(task.visual_quality_result)
+        self.assertEqual(task.visual_quality_result["action"], "warn")
+        self.assertEqual(task.visual_quality_result["summary"], "Visual WARN")
+
+    def test_visual_human_review_result_persisted(self):
+        technical = _make_result(True, "passed")
+        visual = VisualQualityResult(action=VisualQualityAction.HUMAN_REVIEW, summary="Needs human")
+        result, task, _ = self._run_visual_workflow(technical, visual)
+        self.assertIsNotNone(task.visual_quality_result)
+        self.assertEqual(task.visual_quality_result["action"], "human_review")
+        self.assertEqual(task.visual_quality_result["summary"], "Needs human")
+
+    def test_visual_quality_history_appended(self):
+        technical = _make_result(True, "passed")
+        visual = VisualQualityResult(action=VisualQualityAction.PASS, summary="First")
+        result, task, _ = self._run_visual_workflow(technical, visual)
+        self.assertEqual(len(task.visual_quality_history), 1)
+        self.assertEqual(task.visual_quality_history[0]["summary"], "First")
+
+    def test_latest_visual_quality_result_updated(self):
+        technical = _make_result(True, "passed")
+        visual1 = VisualQualityResult(action=VisualQualityAction.PASS, summary="First")
+        result1, task1, _ = self._run_visual_workflow(technical, visual1)
+        preview = _make_preview_artifact(task_id=task1.id)
+        visual2 = VisualQualityResult(action=VisualQualityAction.WARN, summary="Second")
+        visual_reviewer = Mock()
+        visual_reviewer.review.return_value = visual2
+        with patch("main.VisualQualityReviewer", return_value=visual_reviewer):
+            self.factory._run_visual_quality_review(task1, preview)
+        self.assertEqual(len(task1.visual_quality_history), 2)
+        self.assertEqual(task1.visual_quality_history[1]["summary"], "Second")
+        self.assertEqual(task1.visual_quality_result["summary"], "Second")
+
+    def test_multiple_visual_reviews_preserve_history(self):
+        task = self._create_task()
+        preview = _make_preview_artifact(task_id=task.id)
+        v1 = VisualQualityResult(action=VisualQualityAction.PASS, summary="First")
+        v2 = VisualQualityResult(action=VisualQualityAction.WARN, summary="Second")
+        v3 = VisualQualityResult(action=VisualQualityAction.HUMAN_REVIEW, summary="Third")
+        with patch("main.VisualQualityReviewer") as mock_cls:
+            r = Mock()
+            mock_cls.return_value = r
+            r.review.return_value = v1
+            self.factory._run_visual_quality_review(task, preview)
+            r.review.return_value = v2
+            self.factory._run_visual_quality_review(task, preview)
+            r.review.return_value = v3
+            self.factory._run_visual_quality_review(task, preview)
+        self.assertEqual(len(task.visual_quality_history), 3)
+        self.assertEqual(task.visual_quality_history[0]["summary"], "First")
+        self.assertEqual(task.visual_quality_history[1]["summary"], "Second")
+        self.assertEqual(task.visual_quality_history[2]["summary"], "Third")
+        self.assertEqual(task.visual_quality_result["summary"], "Third")
+
+    def test_old_state_without_visual_fields_loads(self):
+        task = self._create_task()
+        task_id = task.id
+        self.factory.save_state()
+        self.factory.load_state()
+        reloaded = workflow_state.get_task(task_id)
+        self.assertIsNotNone(reloaded)
+        self.assertIsNone(reloaded.visual_quality_result)
+        self.assertEqual(reloaded.visual_quality_history, [])
+
+    # PASS ROUTING
+    def test_pass_auto_publish_continues_publish_path(self):
+        technical = _make_result(True, "passed")
+        visual = VisualQualityResult(action=VisualQualityAction.PASS, summary="ok")
+        result, task, mocks = self._run_visual_workflow(technical, visual, approval_mode=ApprovalPolicyMode.AUTO_PUBLISH)
+        self.assertTrue(result)
+        self.assertIn(task.status, (TaskStatus.COMPLETED, TaskStatus.LEARNING))
+        self.assertTrue(mocks["publisher"].publish_content.called)
+
+    def test_pass_require_human_review_awaits_approval(self):
+        technical = _make_result(True, "passed")
+        visual = VisualQualityResult(action=VisualQualityAction.PASS, summary="ok")
+        result, task, mocks = self._run_visual_workflow(technical, visual, approval_mode=ApprovalPolicyMode.REQUIRE_HUMAN_REVIEW)
+        self.assertFalse(result)
+        self.assertEqual(task.status, TaskStatus.AWAITING_APPROVAL)
+        self.assertEqual(task.approval_status, "pending")
+        self.assertFalse(mocks["publisher"].publish_content.called)
+
+    # WARN ROUTING
+    def test_warn_auto_publish_continues_publish_path(self):
+        technical = _make_result(True, "passed")
+        visual = VisualQualityResult(action=VisualQualityAction.WARN, summary="warn")
+        result, task, mocks = self._run_visual_workflow(technical, visual, approval_mode=ApprovalPolicyMode.AUTO_PUBLISH)
+        self.assertTrue(result)
+        self.assertIn(task.status, (TaskStatus.COMPLETED, TaskStatus.LEARNING))
+        self.assertTrue(mocks["publisher"].publish_content.called)
+
+    def test_warn_require_human_review_awaits_approval(self):
+        technical = _make_result(True, "passed")
+        visual = VisualQualityResult(action=VisualQualityAction.WARN, summary="warn")
+        result, task, mocks = self._run_visual_workflow(technical, visual, approval_mode=ApprovalPolicyMode.REQUIRE_HUMAN_REVIEW)
+        self.assertFalse(result)
+        self.assertEqual(task.status, TaskStatus.AWAITING_APPROVAL)
+        self.assertEqual(task.approval_status, "pending")
+        self.assertFalse(mocks["publisher"].publish_content.called)
+
+    def test_warn_does_not_increment_frontend_retry_count(self):
+        technical = _make_result(True, "passed")
+        visual = VisualQualityResult(action=VisualQualityAction.WARN, summary="warn")
+        result, task, mocks = self._run_visual_workflow(technical, visual, approval_mode=ApprovalPolicyMode.AUTO_PUBLISH)
+        self.assertEqual(task.frontend_retry_count, 0)
+
+    def test_warn_does_not_create_frontend_failure_feedback(self):
+        technical = _make_result(True, "passed")
+        visual = VisualQualityResult(action=VisualQualityAction.WARN, summary="warn")
+        result, task, _ = self._run_visual_workflow(technical, visual, approval_mode=ApprovalPolicyMode.AUTO_PUBLISH)
+        self.assertEqual(len(task.frontend_retry_history), 0)
+
+    # HUMAN_REVIEW ROUTING
+    def test_human_review_auto_publish_awaits_approval(self):
+        technical = _make_result(True, "passed")
+        visual = VisualQualityResult(action=VisualQualityAction.HUMAN_REVIEW, summary="needs human")
+        result, task, mocks = self._run_visual_workflow(technical, visual, approval_mode=ApprovalPolicyMode.AUTO_PUBLISH)
+        self.assertFalse(result)
+        self.assertEqual(task.status, TaskStatus.AWAITING_APPROVAL)
+        self.assertEqual(task.approval_status, "pending")
+        self.assertFalse(mocks["publisher"].publish_content.called)
+
+    def test_human_review_require_human_review_awaits_approval(self):
+        technical = _make_result(True, "passed")
+        visual = VisualQualityResult(action=VisualQualityAction.HUMAN_REVIEW, summary="needs human")
+        result, task, mocks = self._run_visual_workflow(technical, visual, approval_mode=ApprovalPolicyMode.REQUIRE_HUMAN_REVIEW)
+        self.assertFalse(result)
+        self.assertEqual(task.status, TaskStatus.AWAITING_APPROVAL)
+        self.assertEqual(task.approval_status, "pending")
+        self.assertFalse(mocks["publisher"].publish_content.called)
+
+    def test_human_review_does_not_increment_frontend_retry_count(self):
+        technical = _make_result(True, "passed")
+        visual = VisualQualityResult(action=VisualQualityAction.HUMAN_REVIEW, summary="needs human")
+        result, task, _ = self._run_visual_workflow(technical, visual, approval_mode=ApprovalPolicyMode.AUTO_PUBLISH)
+        self.assertEqual(task.frontend_retry_count, 0)
+
+    def test_human_review_does_not_create_frontend_failure_feedback(self):
+        technical = _make_result(True, "passed")
+        visual = VisualQualityResult(action=VisualQualityAction.HUMAN_REVIEW, summary="needs human")
+        result, task, _ = self._run_visual_workflow(technical, visual, approval_mode=ApprovalPolicyMode.AUTO_PUBLISH)
+        self.assertEqual(len(task.frontend_retry_history), 0)
+
+    def test_human_review_does_not_set_failed_needs_attention(self):
+        technical = _make_result(True, "passed")
+        visual = VisualQualityResult(action=VisualQualityAction.HUMAN_REVIEW, summary="needs human")
+        result, task, _ = self._run_visual_workflow(technical, visual, approval_mode=ApprovalPolicyMode.AUTO_PUBLISH)
+        self.assertNotEqual(task.status, TaskStatus.FAILED_NEEDS_ATTENTION)
+
+    def test_human_review_does_not_invoke_frontend_agent_again(self):
+        technical = _make_result(True, "passed")
+        visual = VisualQualityResult(action=VisualQualityAction.HUMAN_REVIEW, summary="needs human")
+        result, task, mocks = self._run_visual_workflow(technical, visual, approval_mode=ApprovalPolicyMode.AUTO_PUBLISH)
+        self.assertEqual(mocks["frontend_agent"].generate_frontend.call_count, 1)
+
+    def test_human_review_does_not_rerender_preview(self):
+        technical = _make_result(True, "passed")
+        visual = VisualQualityResult(action=VisualQualityAction.HUMAN_REVIEW, summary="needs human")
+        result, task, mocks = self._run_visual_workflow(technical, visual, approval_mode=ApprovalPolicyMode.AUTO_PUBLISH)
+        self.assertEqual(mocks["renderer"].render.call_count, 1)
+
+    # FAILURE SAFETY
+    def test_provider_failure_result_awaits_approval(self):
+        technical = _make_result(True, "passed")
+        visual_reviewer = Mock()
+        visual_reviewer.review.side_effect = Exception("Provider API error")
+        task = self._create_task()
+        preview = _make_preview_artifact(task_id=task.id)
+        with patch("main.VisualQualityReviewer", return_value=visual_reviewer):
+            self.factory._run_visual_quality_review(task, preview)
+        self.assertEqual(task.visual_quality_result["action"], "human_review")
+        self.assertIn("Provider API error", task.visual_quality_result["summary"])
+
+    def test_malformed_output_result_awaits_approval(self):
+        # Provider returns failure due to malformed model output => reviewer maps to HUMAN_REVIEW
+        technical = _make_result(True, "passed")
+        visual = VisualQualityResult(action=VisualQualityAction.HUMAN_REVIEW, summary="Visual review failed: Malformed JSON")
+        result, task, _ = self._run_visual_workflow(technical, visual, approval_mode=ApprovalPolicyMode.AUTO_PUBLISH)
+        self.assertEqual(task.visual_quality_result["action"], "human_review")
+        self.assertEqual(task.status, TaskStatus.AWAITING_APPROVAL)
+
+    def test_screenshot_read_failure_result_awaits_approval(self):
+        technical = _make_result(True, "passed")
+        visual = VisualQualityResult(action=VisualQualityAction.HUMAN_REVIEW, summary="Visual review failed: Failed to load screenshot")
+        result, task, _ = self._run_visual_workflow(technical, visual)
+        self.assertEqual(task.visual_quality_result["action"], "human_review")
+        self.assertEqual(task.status, TaskStatus.AWAITING_APPROVAL)
+
+    # GOVERNANCE
+    def test_visual_review_may_raise_auto_publish_to_human_review(self):
+        technical = _make_result(True, "passed")
+        visual = VisualQualityResult(action=VisualQualityAction.HUMAN_REVIEW, summary="escalated")
+        result, task, _ = self._run_visual_workflow(technical, visual, approval_mode=ApprovalPolicyMode.AUTO_PUBLISH)
+        self.assertEqual(task.status, TaskStatus.AWAITING_APPROVAL)
+        self.assertEqual(task.approval_status, "pending")
+
+    def test_visual_review_never_lowers_require_human_review(self):
+        technical = _make_result(True, "passed")
+        visual = VisualQualityResult(action=VisualQualityAction.PASS, summary="ok")
+        result, task, _ = self._run_visual_workflow(technical, visual, approval_mode=ApprovalPolicyMode.REQUIRE_HUMAN_REVIEW)
+        self.assertEqual(task.status, TaskStatus.AWAITING_APPROVAL)
+        self.assertEqual(task.approval_policy["mode"], "require_human_review")
+
+    def test_approval_policy_enum_unchanged(self):
+        self.assertEqual(ApprovalPolicyMode.AUTO_PUBLISH.value, "auto_publish")
+        self.assertEqual(ApprovalPolicyMode.REQUIRE_HUMAN_REVIEW.value, "require_human_review")
+        policy_auto = ApprovalPolicy(mode=ApprovalPolicyMode.AUTO_PUBLISH)
+        policy_human = ApprovalPolicy(mode=ApprovalPolicyMode.REQUIRE_HUMAN_REVIEW)
+        self.assertEqual(policy_auto.mode, ApprovalPolicyMode.AUTO_PUBLISH)
+        self.assertEqual(policy_human.mode, ApprovalPolicyMode.REQUIRE_HUMAN_REVIEW)
+        auto_dict = policy_auto.to_dict()
+        human_dict = policy_human.to_dict()
+        restored_auto = ApprovalPolicy.from_dict(auto_dict)
+        restored_human = ApprovalPolicy.from_dict(human_dict)
+        self.assertEqual(restored_auto.mode, ApprovalPolicyMode.AUTO_PUBLISH)
+        self.assertEqual(restored_human.mode, ApprovalPolicyMode.REQUIRE_HUMAN_REVIEW)
+
+    def test_approval_resume_path_compatible(self):
+        technical = _make_result(True, "passed")
+        visual = VisualQualityResult(action=VisualQualityAction.HUMAN_REVIEW, summary="human")
+        result, task, mocks = self._run_visual_workflow(technical, visual, approval_mode=ApprovalPolicyMode.AUTO_PUBLISH)
+        self.assertEqual(task.status, TaskStatus.AWAITING_APPROVAL)
+        approved = self.factory.submit_approval_decision(task.id, True, "Looks good")
+        self.assertTrue(approved)
+        task = workflow_state.get_task(task.id)
+        self.assertIn(task.status, (TaskStatus.COMPLETED, TaskStatus.LEARNING))
+        self.assertTrue(task.approval_decision)
+
+    # BOUNDARIES
+    def test_no_visual_retry_counter_added(self):
+        technical = _make_result(True, "passed")
+        visual = VisualQualityResult(action=VisualQualityAction.HUMAN_REVIEW, summary="human")
+        result, task, _ = self._run_visual_workflow(technical, visual, approval_mode=ApprovalPolicyMode.AUTO_PUBLISH)
+        self.assertFalse(hasattr(task, "visual_retry_count"))
+        self.assertFalse(hasattr(task, "visual_quality_retry_count"))
+
+    def test_image_agent_unchanged_position(self):
+        technical = _make_result(True, "passed")
+        visual = VisualQualityResult(action=VisualQualityAction.PASS, summary="ok")
+        result, task, mocks = self._run_visual_workflow(technical, visual, approval_mode=ApprovalPolicyMode.AUTO_PUBLISH)
+        self.assertEqual(mocks["image"].generate_hero_image.call_count, 1)
+        task2 = self._create_task(approval_mode=ApprovalPolicyMode.AUTO_PUBLISH)
+        visual2 = VisualQualityResult(action=VisualQualityAction.HUMAN_REVIEW, summary="human")
+        with patch("main.VisualQualityReviewer") as mock_cls:
+            r = Mock()
+            r.review.return_value = visual2
+            mock_cls.return_value = r
+            self.factory._run_visual_quality_review(task2, _make_preview_artifact(task_id=task2.id))
+        self.assertEqual(r.review.call_count, 1)
+
+    def test_no_wordpress_preview_introduced(self):
+        technical = _make_result(True, "passed")
+        visual = VisualQualityResult(action=VisualQualityAction.PASS, summary="ok")
+        result, task, mocks = self._run_visual_workflow(technical, visual, approval_mode=ApprovalPolicyMode.AUTO_PUBLISH)
+        self.assertEqual(mocks["renderer"].render.call_count, 1)
+
+    # STATUS SEMANTICS HARDENING
+    def test_pass_does_not_revert_status_to_rendered_technical_check(self):
+        """PASS should not reset status to FRONTEND_RENDERED_TECHNICAL_CHECK."""
+        technical = _make_result(True, "passed")
+        visual = VisualQualityResult(action=VisualQualityAction.PASS, summary="ok")
+        result, task, _ = self._run_visual_workflow(technical, visual, approval_mode=ApprovalPolicyMode.AUTO_PUBLISH)
+        # After visual PASS, status should have moved forward (COMPLETED/LEARNING/AWAITING_APPROVAL)
+        # and NOT be FRONTEND_RENDERED_TECHNICAL_CHECK
+        self.assertNotEqual(task.status, TaskStatus.FRONTEND_RENDERED_TECHNICAL_CHECK)
+
+    def test_warn_does_not_revert_status_to_rendered_technical_check(self):
+        """WARN should not reset status to FRONTEND_RENDERED_TECHNICAL_CHECK."""
+        technical = _make_result(True, "passed")
+        visual = VisualQualityResult(action=VisualQualityAction.WARN, summary="warn")
+        result, task, _ = self._run_visual_workflow(technical, visual, approval_mode=ApprovalPolicyMode.AUTO_PUBLISH)
+        self.assertNotEqual(task.status, TaskStatus.FRONTEND_RENDERED_TECHNICAL_CHECK)
+
+    def test_no_new_task_status_for_visual_review(self):
+        """Ensure no micro-status like FRONTEND_VISUAL_REVIEW_PASSED was added."""
+        # The only visual-related status should be FRONTEND_VISUAL_REVIEW
+        self.assertTrue(hasattr(TaskStatus, "FRONTEND_VISUAL_REVIEW"))
+        # These should NOT exist
+        self.assertFalse(hasattr(TaskStatus, "FRONTEND_VISUAL_REVIEW_PASSED"))
+        self.assertFalse(hasattr(TaskStatus, "FRONTEND_VISUAL_REVIEW_WARN"))
+        self.assertFalse(hasattr(TaskStatus, "VISUAL_REVIEW_COMPLETE"))
+        self.assertFalse(hasattr(TaskStatus, "GOVERNANCE_CHECK"))
 
 if __name__ == "__main__":
     unittest.main()
