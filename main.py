@@ -27,6 +27,8 @@ from contracts import (
     BrandProductionRules,
     PreviewArtifact, PreviewInfrastructureFailure, FailureCategory,
     VisualQualityResult, VisualQualityAction,
+    ImageArtifact, ImageArtifactStatus,
+    create_image_artifact,
 )
 from agents.quality_evaluator import QualityEvaluatorAgent
 from agents.content_fixer import ContentFixerAgent
@@ -496,6 +498,10 @@ class AIWordPressFactory:
                 # All gates passed
                 frontend_pipeline_passed = True
                 
+                # Phase 7D-5D: Prepare image artifact BEFORE preview rendering
+                workflow_state.update_task_status(task_id, TaskStatus.GENERATING_IMAGE)
+                image_artifact = self._prepare_image_artifact(task)
+                
                 # Phase 7D-1: Preview Rendering
                 workflow_state.update_task_status(task_id, TaskStatus.FRONTEND_PREVIEW_RENDERING)
                 preview_renderer = PreviewRenderer(config)
@@ -507,6 +513,7 @@ class AIWordPressFactory:
                     task_id=task_id,
                     frontend_result=frontend_result,
                     attempt_number=attempt_number,
+                    image_artifact=image_artifact,
                 )
                 
                 if preview_failure:
@@ -1132,6 +1139,100 @@ class AIWordPressFactory:
         )
         return result
 
+    def _prepare_image_artifact(self, task: Task) -> Optional[ImageArtifact]:
+        """Prepare or reuse an ImageArtifact for the task.
+        
+        Implements idempotent reuse:
+        - If Task.image_artifact exists with status READY → return it (no ImageAgent call)
+        - If Task.image_artifact exists with status FAILED/PENDING → return it (no regeneration)
+        - If no image_artifact → call existing ImageAgent, materialize result into ImageArtifact
+        
+        Args:
+            task: The task to prepare image artifact for.
+            
+        Returns:
+            ImageArtifact if available/created, None if image generation disabled.
+        """
+        # Check if image agent is enabled
+        if not getattr(config, "agents", {}).get("image", {}).get("enabled", True):
+            logger.info(f"任務 {task.id} 圖片生成已禁用，跳過")
+            return None
+            
+        # Reuse existing READY artifact
+        if task.image_artifact:
+            existing_artifact = ImageArtifact.from_dict(task.image_artifact)
+            if existing_artifact.status == ImageArtifactStatus.READY:
+                logger.info(f"任務 {task.id} 重用現有 READY 圖片 artifact: {existing_artifact.artifact_id}")
+                return existing_artifact
+            elif existing_artifact.status == ImageArtifactStatus.FAILED:
+                logger.info(f"任務 {task.id} 現有圖片 artifact 狀態為 FAILED，不再重試: {existing_artifact.artifact_id}")
+                return existing_artifact
+            elif existing_artifact.status == ImageArtifactStatus.PENDING:
+                logger.info(f"任務 {task.id} 現有圖片 artifact 狀態為 PENDING，保持現狀: {existing_artifact.artifact_id}")
+                return existing_artifact
+        
+        # No existing artifact - invoke existing ImageAgent
+        logger.info(f"任務 {task.id} 開始準備圖片 artifact")
+        image_agent = self._get_agent("image")
+        if not image_agent:
+            logger.warning(f"任務 {task.id} 無法獲取 ImageAgent")
+            return None
+            
+        # Call existing ImageAgent behavior
+        try:
+            media_id, media_url = image_agent.generate_hero_image(task)
+        except Exception as e:
+            logger.warning(f"任務 {task.id} 圖片生成異常: {str(e)}")
+            # Create FAILED artifact
+            failed_artifact = create_image_artifact(
+                status=ImageArtifactStatus.FAILED,
+                prompt=getattr(task, 'image_prompt', None),
+                source_url=getattr(task, 'image_url', None),
+                metadata={"error": str(e)}
+            )
+            task.image_artifact = failed_artifact.to_dict()
+            self.save_state()
+            return failed_artifact
+        
+        # Materialize result into ImageArtifact
+        if media_id and media_url:
+            # Success - create READY artifact
+            artifact = create_image_artifact(
+                status=ImageArtifactStatus.READY,
+                wordpress_media_id=media_id,
+                wordpress_media_url=media_url,
+                source_url=getattr(task, 'image_url', None),
+                prompt=getattr(task, 'image_prompt', None),
+                provider="openai",  # From existing ImageAgent
+                model="dall-e-3",   # From existing ImageAgent
+                metadata={"generation": "success"}
+            )
+            # Sync legacy fields for backward compatibility
+            task.hero_image_id = media_id
+            task.hero_image_url = media_url
+            task.image_status = "success"
+        else:
+            # Failure - create FAILED artifact
+            artifact = create_image_artifact(
+                status=ImageArtifactStatus.FAILED,
+                prompt=getattr(task, 'image_prompt', None),
+                source_url=getattr(task, 'image_url', None),
+                metadata={"generation": "failed"}
+            )
+            # Sync legacy fields for backward compatibility
+            task.image_status = "failed"
+        
+        # Persist artifact on Task
+        task.image_artifact = artifact.to_dict()
+        self.save_state()
+        
+        if artifact.status == ImageArtifactStatus.READY:
+            logger.info(f"任務 {task.id} 圖片 artifact 創建完成: {artifact.artifact_id}")
+        else:
+            logger.warning(f"任務 {task.id} 圖片 artifact 創建失敗: {artifact.artifact_id}")
+            
+        return artifact
+
     def _resolve_approval_policy(self, task: Task) -> ApprovalPolicy:
         """Resolve the approval policy for a task.
         
@@ -1225,24 +1326,29 @@ class AIWordPressFactory:
             return False
         
         try:
-            # Step 8: 圖片生成階段
-            workflow_state.update_task_status(task_id, TaskStatus.GENERATING_IMAGE)
-            image_agent = self._get_agent("image")
-            if image_agent and getattr(config, "agents", {}).get("image", {}).get("enabled", True):
-                try:
-                    media_id, media_url = image_agent.generate_hero_image(task)
-                    task.hero_image_id = media_id
-                    task.hero_image_url = media_url
-                    task.image_status = "success" if media_id else "failed"
-                    if media_id:
-                        logger.info(f"任務 {task_id} 圖片生成完成: {media_url}")
-                    else:
-                        logger.warning(f"任務 {task_id} 圖片生成失敗，將繼續發布（無精選圖片）")
-                except Exception as e:
-                    logger.warning(f"任務 {task_id} 圖片生成異常: {str(e)}")
+            # Step 8: 圖片生成階段 - image artifact should already be prepared before preview
+            # Use existing image artifact if available
+            if task.image_artifact:
+                artifact = ImageArtifact.from_dict(task.image_artifact)
+                # Sync legacy fields for backward compatibility (should already be set)
+                if artifact.status == ImageArtifactStatus.READY:
+                    task.hero_image_id = artifact.wordpress_media_id
+                    task.hero_image_url = artifact.wordpress_media_url
+                    task.image_status = "success"
+                    logger.info(f"任務 {task_id} 重用現有 READY 圖片 artifact: {artifact.artifact_id}")
+                elif artifact.status == ImageArtifactStatus.FAILED:
                     task.image_status = "failed"
+                    logger.warning(f"任務 {task_id} 現有圖片 artifact 狀態為 FAILED: {artifact.artifact_id}")
+                else:  # PENDING
+                    task.image_status = "failed"
+                    logger.warning(f"任務 {task_id} 現有圖片 artifact 狀態為 PENDING，視為失敗: {artifact.artifact_id}")
+            elif task.hero_image_id:
+                # Legacy task with existing hero_image_id but no image_artifact
+                logger.info(f"任務 {task_id} 使用舊版 hero_image_id: {task.hero_image_id}")
+                task.image_status = "success"
             else:
-                logger.info(f"任務 {task_id} 圖片生成已禁用，跳過")
+                logger.info(f"任務 {task_id} 無圖片 artifact 或 hero_image_id，跳過圖片發布")
+                task.image_status = "failed"
             
             # Step 9: 發布階段
             workflow_state.update_task_status(task_id, TaskStatus.PUBLISHING)

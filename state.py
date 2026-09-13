@@ -135,6 +135,9 @@ class Task:
     visual_quality_result: Optional[Dict[str, Any]] = None
     visual_quality_history: List[Dict[str, Any]] = field(default_factory=list)
 
+    # Phase 7D-5A: Image artifact contract
+    image_artifact: Optional[Dict[str, Any]] = None
+
     @property
     def latest_preview(self) -> Optional[Dict[str, Any]]:
         """Derive latest preview from preview_history (durable source of truth).
@@ -213,6 +216,7 @@ class Task:
             "rendered_technical_history": self.rendered_technical_history,
             "visual_quality_result": self.visual_quality_result,
             "visual_quality_history": self.visual_quality_history,
+            "image_artifact": self.image_artifact,
         }
 
     @classmethod
@@ -284,6 +288,7 @@ class Task:
             rendered_technical_history=data.get("rendered_technical_history", []),
             visual_quality_result=data.get("visual_quality_result"),
             visual_quality_history=data.get("visual_quality_history", []),
+            image_artifact=data.get("image_artifact"),
         )
 
 

@@ -43,6 +43,13 @@ class ProposalStatus(str, Enum):
     REJECTED = "rejected"
 
 
+class ImageArtifactStatus(str, Enum):
+    """Image artifact lifecycle status."""
+    PENDING = "pending"
+    READY = "ready"
+    FAILED = "failed"
+
+
 @dataclass
 class AIPattern:
     type: str
@@ -79,6 +86,90 @@ class LearningProposal:
     source_task: str = ""
     created_at: str = ""
     status: str = ProposalStatus.PENDING.value
+
+
+@dataclass
+class ImageArtifact:
+    """Stable, serializable image artifact contract for durable reuse across preview, review, approval, and publish."""
+    artifact_id: str
+    status: ImageArtifactStatus = ImageArtifactStatus.PENDING
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    source_url: Optional[str] = None
+    local_path: Optional[str] = None
+    wordpress_media_id: Optional[int] = None
+    wordpress_media_url: Optional[str] = None
+    prompt: Optional[str] = None
+    alt_text: Optional[str] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    content_type: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    created_at: str = field(default_factory=lambda: datetime.datetime.now().isoformat())
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "artifact_id": self.artifact_id,
+            "status": self.status.value if isinstance(self.status, ImageArtifactStatus) else self.status,
+            "provider": self.provider,
+            "model": self.model,
+            "source_url": self.source_url,
+            "local_path": self.local_path,
+            "wordpress_media_id": self.wordpress_media_id,
+            "wordpress_media_url": self.wordpress_media_url,
+            "prompt": self.prompt,
+            "alt_text": self.alt_text,
+            "width": self.width,
+            "height": self.height,
+            "content_type": self.content_type,
+            "metadata": self.metadata,
+            "created_at": self.created_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ImageArtifact":
+        status = data.get("status", "pending")
+        if isinstance(status, str):
+            status = ImageArtifactStatus(status)
+        return cls(
+            artifact_id=data["artifact_id"],
+            status=status,
+            provider=data.get("provider"),
+            model=data.get("model"),
+            source_url=data.get("source_url"),
+            local_path=data.get("local_path"),
+            wordpress_media_id=data.get("wordpress_media_id"),
+            wordpress_media_url=data.get("wordpress_media_url"),
+            prompt=data.get("prompt"),
+            alt_text=data.get("alt_text"),
+            width=data.get("width"),
+            height=data.get("height"),
+            content_type=data.get("content_type"),
+            metadata=data.get("metadata", {}),
+            created_at=data.get("created_at", datetime.datetime.now().isoformat()),
+        )
+
+
+def create_image_artifact_id() -> str:
+    """Generate a stable unique artifact ID for an image artifact.
+    
+    Format: img_<uuid>
+    """
+    import uuid
+    return f"img_{uuid.uuid4().hex[:12]}"
+
+
+def create_image_artifact(**kwargs) -> ImageArtifact:
+    """Factory function to create an ImageArtifact with auto-generated artifact_id.
+    
+    Args:
+        **kwargs: All ImageArtifact fields except artifact_id (auto-generated)
+        
+    Returns:
+        ImageArtifact with generated artifact_id
+    """
+    artifact_id = kwargs.pop("artifact_id", None) or create_image_artifact_id()
+    return ImageArtifact(artifact_id=artifact_id, **kwargs)
 
 
 @dataclass
@@ -465,6 +556,7 @@ class PreviewArtifact:
     mobile_viewport: PreviewViewport
     
     created_at: str
+    image_artifact_id: Optional[str] = None
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -478,6 +570,7 @@ class PreviewArtifact:
             "desktop_viewport": self.desktop_viewport.to_dict(),
             "mobile_viewport": self.mobile_viewport.to_dict(),
             "created_at": self.created_at,
+            "image_artifact_id": self.image_artifact_id,
         }
     
     @classmethod
@@ -493,6 +586,7 @@ class PreviewArtifact:
             desktop_viewport=PreviewViewport.from_dict(data.get("desktop_viewport", {"width": 1440, "height": 900})),
             mobile_viewport=PreviewViewport.from_dict(data.get("mobile_viewport", {"width": 390, "height": 844})),
             created_at=data.get("created_at", datetime.datetime.now().isoformat()),
+            image_artifact_id=data.get("image_artifact_id"),
         )
 
 

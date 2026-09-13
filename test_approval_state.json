@@ -1,14 +1,14 @@
 {
   "tasks": {
-    "41a798fc-938c-452a-b8c3-ca02ee7260bd": {
-      "id": "41a798fc-938c-452a-b8c3-ca02ee7260bd",
+    "ca51122c-376a-4bac-9e15-6ef9f8b5a70a": {
+      "id": "ca51122c-376a-4bac-9e15-6ef9f8b5a70a",
       "title": "Test Blog Post",
       "description": "A test blog post for frontend pipeline",
       "content_type": "BLOG_POST",
       "status": "AWAITING_APPROVAL",
       "priority": 0,
-      "created_at": "2026-09-13T00:03:12.286501",
-      "updated_at": "2026-09-13T00:03:12.286501",
+      "created_at": "2026-09-13T04:05:49.619589",
+      "updated_at": "2026-09-13T04:05:49.619589",
       "completed_at": null,
       "error_message": null,
       "plan": null,
@@ -58,9 +58,10 @@
       "rendered_technical_result": null,
       "rendered_technical_history": [],
       "visual_quality_result": null,
-      "visual_quality_history": []
+      "visual_quality_history": [],
+      "image_artifact": null
     }
   },
-  "current_task_id": "41a798fc-938c-452a-b8c3-ca02ee7260bd",
+  "current_task_id": "ca51122c-376a-4bac-9e15-6ef9f8b5a70a",
   "global_state": {}
 }

@@ -20,6 +20,7 @@ import uuid
 import datetime
 import tempfile
 import shutil
+from html import escape
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
 from dataclasses import dataclass
@@ -27,7 +28,8 @@ from enum import Enum
 
 from contracts import (
     PreviewArtifact, PreviewViewport, PreviewInfrastructureFailure,
-    FailureCategory, FrontendResult, RenderedEvidence, ViewportRenderedEvidence
+    FailureCategory, FrontendResult, RenderedEvidence, ViewportRenderedEvidence,
+    ImageArtifact, ImageArtifactStatus,
 )
 from . import BaseTool
 
@@ -86,6 +88,7 @@ class PreviewRenderer(BaseTool):
         frontend_result: FrontendResult,
         attempt_number: int,
         preview_id: Optional[str] = None,
+        image_artifact: Optional[ImageArtifact] = None,
     ) -> Tuple[Optional[PreviewArtifact], Optional[PreviewInfrastructureFailure], Optional[RenderedEvidence]]:
         """Render frontend artifact and capture preview screenshots.
         
@@ -94,6 +97,7 @@ class PreviewRenderer(BaseTool):
             frontend_result: Validated frontend result (after production quality gate)
             attempt_number: Frontend generation attempt number (1-indexed)
             preview_id: Optional preview ID (generated if not provided)
+            image_artifact: Optional READY ImageArtifact to compose into preview
             
         Returns:
             Tuple of (PreviewArtifact, PreviewInfrastructureFailure, RenderedEvidence)
@@ -108,7 +112,7 @@ class PreviewRenderer(BaseTool):
         preview_dir = self._create_preview_directory(task_id, attempt_number, preview_id)
         
         # Assemble temporary HTML document
-        html_path = self._assemble_preview_html(frontend_result, preview_dir)
+        html_path = self._assemble_preview_html(frontend_result, preview_dir, image_artifact)
         
         # Render with browser (with infrastructure retry)
         for infra_attempt in range(self.MAX_INFRA_RETRIES + 1):
@@ -119,6 +123,7 @@ class PreviewRenderer(BaseTool):
                     attempt_number=attempt_number,
                     html_path=html_path,
                     preview_dir=preview_dir,
+                    image_artifact=image_artifact,
                 )
                 return artifact, None, evidence
                 
@@ -174,7 +179,7 @@ class PreviewRenderer(BaseTool):
         preview_dir.mkdir(parents=True, exist_ok=True)
         return preview_dir
     
-    def _assemble_preview_html(self, frontend_result: FrontendResult, preview_dir: Path) -> Path:
+    def _assemble_preview_html(self, frontend_result: FrontendResult, preview_dir: Path, image_artifact: Optional[ImageArtifact] = None) -> Path:
         """Assemble a complete HTML document for browser rendering.
         
         Uses the most production-representative artifact available:
@@ -187,6 +192,7 @@ class PreviewRenderer(BaseTool):
         - Generated CSS (inlined in <style>)
         - Generated JS (inlined in <script>) if present
         - Frontend content
+        - Optional hero image from READY ImageArtifact
         - Responsive viewport meta tag
         - No external dependencies (security gate already passed)
         """
@@ -201,6 +207,11 @@ class PreviewRenderer(BaseTool):
         else:
             content_html = html
             
+        # Inject hero image from READY ImageArtifact if available
+        hero_markup = ""
+        if image_artifact and self._is_ready_image_artifact(image_artifact):
+            hero_markup = self._build_hero_image_markup(image_artifact)
+        
         # Build complete HTML document
         document = f"""<!DOCTYPE html>
 <html lang="en">
@@ -213,6 +224,7 @@ class PreviewRenderer(BaseTool):
     </style>
 </head>
 <body>
+{hero_markup}
 {content_html}
     <script>
 {javascript}
@@ -224,6 +236,38 @@ class PreviewRenderer(BaseTool):
         html_path.write_text(document, encoding='utf-8')
         return html_path
     
+    def _is_ready_image_artifact(self, image_artifact: ImageArtifact) -> bool:
+        status = image_artifact.status.value if isinstance(image_artifact.status, ImageArtifactStatus) else image_artifact.status
+        return status == ImageArtifactStatus.READY.value
+
+    def _resolve_image_source(self, image_artifact: ImageArtifact) -> Optional[str]:
+        if image_artifact.local_path:
+            local_path = Path(image_artifact.local_path).expanduser()
+            if local_path.is_file():
+                return local_path.resolve().as_uri()
+
+        if image_artifact.wordpress_media_url:
+            return image_artifact.wordpress_media_url
+
+        if image_artifact.source_url:
+            return image_artifact.source_url
+
+        return None
+
+    def _build_hero_image_markup(self, image_artifact: ImageArtifact) -> str:
+        """Build deterministic preview-only hero image markup from READY ImageArtifact."""
+        image_src = self._resolve_image_source(image_artifact)
+        if not image_src:
+            return ""
+
+        artifact_id = escape(str(image_artifact.artifact_id), quote=True)
+        image_src = escape(image_src, quote=True)
+        alt_text = escape(image_artifact.alt_text or "", quote=True)
+
+        return f'''<figure data-preview-hero-image="true" data-image-artifact-id="{artifact_id}">
+    <img src="{image_src}" alt="{alt_text}" style="max-width: 100%; height: auto;">
+</figure>'''
+    
     def _render_with_browser(
         self,
         task_id: str,
@@ -231,6 +275,7 @@ class PreviewRenderer(BaseTool):
         attempt_number: int,
         html_path: Path,
         preview_dir: Path,
+        image_artifact: Optional[ImageArtifact] = None,
     ) -> Tuple[PreviewArtifact, RenderedEvidence]:
         """Render HTML in browser, capture four screenshots, and collect rendered evidence.
         
@@ -385,6 +430,11 @@ class PreviewRenderer(BaseTool):
                     retryable=True
                 )
         
+        # Determine image_artifact_id for traceability
+        image_artifact_id = None
+        if image_artifact and self._is_ready_image_artifact(image_artifact):
+            image_artifact_id = image_artifact.artifact_id
+        
         # Create PreviewArtifact
         artifact = PreviewArtifact(
             task_id=task_id,
@@ -397,6 +447,7 @@ class PreviewRenderer(BaseTool):
             desktop_viewport=PreviewViewport(width=self.DESKTOP_WIDTH, height=self.DESKTOP_HEIGHT),
             mobile_viewport=PreviewViewport(width=self.MOBILE_WIDTH, height=self.MOBILE_HEIGHT),
             created_at=datetime.datetime.now().isoformat(),
+            image_artifact_id=image_artifact_id,
         )
         
         # Build RenderedEvidence from collected browser data
@@ -444,7 +495,8 @@ def render_preview(
     attempt_number: int,
     config=None,
     preview_id: Optional[str] = None,
+    image_artifact: Optional[ImageArtifact] = None,
 ) -> Tuple[Optional[PreviewArtifact], Optional[PreviewInfrastructureFailure], Optional[RenderedEvidence]]:
     """Convenience function to render a preview."""
     renderer = PreviewRenderer(config or type('Config', (), {})())
-    return renderer.render(task_id, frontend_result, attempt_number, preview_id)
+    return renderer.render(task_id, frontend_result, attempt_number, preview_id, image_artifact)

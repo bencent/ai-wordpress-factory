@@ -1,15 +1,15 @@
 {
   "tasks": {
-    "33e643ce-f1ea-4a11-8a78-a4052aa0621d": {
-      "id": "33e643ce-f1ea-4a11-8a78-a4052aa0621d",
+    "270457cd-4116-4b3d-a8dd-f4c7549c9db5": {
+      "id": "270457cd-4116-4b3d-a8dd-f4c7549c9db5",
       "title": "Test Blog Post",
       "description": null,
       "content_type": "BLOG_POST",
       "status": "LEARNING",
       "priority": 0,
-      "created_at": "2026-09-13T00:03:45.116248",
-      "updated_at": "2026-09-13T00:03:47.806774",
-      "completed_at": "2026-09-13T00:03:47.806769",
+      "created_at": "2026-09-13T04:06:27.622232",
+      "updated_at": "2026-09-13T04:06:30.312548",
+      "completed_at": "2026-09-13T04:06:30.312540",
       "error_message": null,
       "plan": {
         "outline": [
@@ -54,7 +54,7 @@
       ],
       "learning_proposals": [],
       "frontend_request": {
-        "task_id": "33e643ce-f1ea-4a11-8a78-a4052aa0621d",
+        "task_id": "270457cd-4116-4b3d-a8dd-f4c7549c9db5",
         "content_type": "BLOG_POST",
         "frontend_scope": "page",
         "animation_required": false,
@@ -69,7 +69,7 @@
         "metadata": {}
       },
       "frontend_result": {
-        "task_id": "33e643ce-f1ea-4a11-8a78-a4052aa0621d",
+        "task_id": "270457cd-4116-4b3d-a8dd-f4c7549c9db5",
         "success": true,
         "html": "<!-- wp:paragraph --><p>Test</p><!-- /wp:paragraph -->",
         "css": "body { color: red; }",
@@ -83,7 +83,7 @@
         "metadata": {}
       },
       "frontend_security_result": {
-        "task_id": "33e643ce-f1ea-4a11-8a78-a4052aa0621d",
+        "task_id": "270457cd-4116-4b3d-a8dd-f4c7549c9db5",
         "passed": true,
         "html": "<html><body><div>Test</div></body></html>",
         "css": "body { color: red; }",
@@ -93,7 +93,7 @@
         "blocked_items": []
       },
       "frontend_conversion_result": {
-        "task_id": "33e643ce-f1ea-4a11-8a78-a4052aa0621d",
+        "task_id": "270457cd-4116-4b3d-a8dd-f4c7549c9db5",
         "success": true,
         "blocks": "<!-- wp:paragraph --><p>Test</p><!-- /wp:paragraph -->",
         "errors": [],
@@ -101,7 +101,7 @@
         "conversion_metadata": {}
       },
       "frontend_validation_result": {
-        "task_id": "33e643ce-f1ea-4a11-8a78-a4052aa0621d",
+        "task_id": "270457cd-4116-4b3d-a8dd-f4c7549c9db5",
         "passed": true,
         "validation_status": "passed",
         "errors": [],
@@ -149,7 +149,7 @@
           "error": "Missing WordPress block comments",
           "feedback": "Frontend validation failed. Errors: Missing WordPress block comments. Please fix HTML structure (unclosed tags), CSS syntax (unmatched braces), JavaScript syntax (parseable by Node.js), and WordPress block format (balanced wp: comments with valid JSON attributes).",
           "action": "FRONTEND_REGENERATE",
-          "timestamp": "2026-09-13T00:03:45.120615",
+          "timestamp": "2026-09-13T04:06:27.627478",
           "details": {
             "validation_errors": [
               "Missing WordPress block comments"
@@ -178,13 +178,13 @@
       "approval_decision": null,
       "preview_history": [
         {
-          "task_id": "33e643ce-f1ea-4a11-8a78-a4052aa0621d",
-          "preview_id": "73f7e47b",
+          "task_id": "270457cd-4116-4b3d-a8dd-f4c7549c9db5",
+          "preview_id": "f6bd81b2",
           "attempt_number": 2,
-          "desktop_viewport_screenshot_path": "artifacts\\previews\\33e643ce-f1ea-4a11-8a78-a4052aa0621d\\attempt-2\\73f7e47b\\desktop-viewport.png",
-          "desktop_full_page_screenshot_path": "artifacts\\previews\\33e643ce-f1ea-4a11-8a78-a4052aa0621d\\attempt-2\\73f7e47b\\desktop-full.png",
-          "mobile_viewport_screenshot_path": "artifacts\\previews\\33e643ce-f1ea-4a11-8a78-a4052aa0621d\\attempt-2\\73f7e47b\\mobile-viewport.png",
-          "mobile_full_page_screenshot_path": "artifacts\\previews\\33e643ce-f1ea-4a11-8a78-a4052aa0621d\\attempt-2\\73f7e47b\\mobile-full.png",
+          "desktop_viewport_screenshot_path": "artifacts\\previews\\270457cd-4116-4b3d-a8dd-f4c7549c9db5\\attempt-2\\f6bd81b2\\desktop-viewport.png",
+          "desktop_full_page_screenshot_path": "artifacts\\previews\\270457cd-4116-4b3d-a8dd-f4c7549c9db5\\attempt-2\\f6bd81b2\\desktop-full.png",
+          "mobile_viewport_screenshot_path": "artifacts\\previews\\270457cd-4116-4b3d-a8dd-f4c7549c9db5\\attempt-2\\f6bd81b2\\mobile-viewport.png",
+          "mobile_full_page_screenshot_path": "artifacts\\previews\\270457cd-4116-4b3d-a8dd-f4c7549c9db5\\attempt-2\\f6bd81b2\\mobile-full.png",
           "desktop_viewport": {
             "width": 1440,
             "height": 900
@@ -193,12 +193,13 @@
             "width": 390,
             "height": 844
           },
-          "created_at": "2026-09-13T00:03:47.805923"
+          "created_at": "2026-09-13T04:06:30.311122",
+          "image_artifact_id": null
         }
       ],
       "rendered_technical_result": {
-        "task_id": "33e643ce-f1ea-4a11-8a78-a4052aa0621d",
-        "preview_id": "73f7e47b",
+        "task_id": "270457cd-4116-4b3d-a8dd-f4c7549c9db5",
+        "preview_id": "f6bd81b2",
         "attempt_number": 2,
         "passed": true,
         "validation_status": "passed",
@@ -212,12 +213,12 @@
             "mobile"
           ]
         },
-        "created_at": "2026-09-13T00:03:47.805948"
+        "created_at": "2026-09-13T04:06:30.311160"
       },
       "rendered_technical_history": [
         {
-          "task_id": "33e643ce-f1ea-4a11-8a78-a4052aa0621d",
-          "preview_id": "73f7e47b",
+          "task_id": "270457cd-4116-4b3d-a8dd-f4c7549c9db5",
+          "preview_id": "f6bd81b2",
           "attempt_number": 2,
           "passed": true,
           "validation_status": "passed",
@@ -231,7 +232,7 @@
               "mobile"
             ]
           },
-          "created_at": "2026-09-13T00:03:47.805948"
+          "created_at": "2026-09-13T04:06:30.311160"
         }
       ],
       "visual_quality_result": {
@@ -240,7 +241,7 @@
         "issues": [],
         "reviewed_viewports": [],
         "reviewer": null,
-        "reviewed_at": "2026-09-13T00:03:45.114424"
+        "reviewed_at": "2026-09-13T04:06:27.620697"
       },
       "visual_quality_history": [
         {
@@ -249,11 +250,30 @@
           "issues": [],
           "reviewed_viewports": [],
           "reviewer": null,
-          "reviewed_at": "2026-09-13T00:03:45.114424"
+          "reviewed_at": "2026-09-13T04:06:27.620697"
         }
-      ]
+      ],
+      "image_artifact": {
+        "artifact_id": "img_dbd8463bdac6",
+        "status": "failed",
+        "provider": null,
+        "model": null,
+        "source_url": null,
+        "local_path": null,
+        "wordpress_media_id": null,
+        "wordpress_media_url": null,
+        "prompt": null,
+        "alt_text": null,
+        "width": null,
+        "height": null,
+        "content_type": null,
+        "metadata": {
+          "generation": "failed"
+        },
+        "created_at": "2026-09-13T04:06:27.628349"
+      }
     }
   },
-  "current_task_id": "33e643ce-f1ea-4a11-8a78-a4052aa0621d",
+  "current_task_id": "270457cd-4116-4b3d-a8dd-f4c7549c9db5",
   "global_state": {}
 }
