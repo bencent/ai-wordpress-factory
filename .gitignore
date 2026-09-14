@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Runtime artifacts
+artifacts/previews/
+workflow_state.json
+wordpress-mcp.log
+
+# Test-generated state files
+test_approval_state*.json
+
+# Local configuration and credentials
+config.json
+
+# Ad hoc debugging and temporary validation files
+debug_*.py
+test.js
+test_bad.js
