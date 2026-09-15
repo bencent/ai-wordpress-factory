@@ -458,7 +458,7 @@ class TestPreviewImageComposition(unittest.TestCase):
 
     def test_no_automatic_regeneration_boundary(self):
         source = inspect.getsource(AIWordPressFactory._prepare_image_artifact)
-        self.assertIn("if task.image_artifact:", source)
+        self.assertIn("if task.image_artifact is not None:", source)
         self.assertIn("ImageArtifactStatus.FAILED", source)
         self.assertNotIn("while ", source)
 

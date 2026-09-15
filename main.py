@@ -8,6 +8,7 @@ import json
 import uuid
 import datetime
 import sys
+from pathlib import Path
 
 from config import config, load_config_from_file
 from state import (
@@ -502,6 +503,46 @@ class AIWordPressFactory:
                 workflow_state.update_task_status(task_id, TaskStatus.GENERATING_IMAGE)
                 image_artifact = self._prepare_image_artifact(task)
                 
+                # Phase 7D-5E: Deterministic image preparation guard
+                # Explicit disabled check using existing config semantics
+                image_enabled = getattr(config, "agents", {}).get("image", {}).get("enabled", True)
+
+                if not image_enabled:
+                    # Intentional absence - image generation explicitly disabled
+                    logger.info(f"任務 {task.id} 圖片生成已禁用，繼續無圖片流程")
+                    image_artifact = None
+                elif image_artifact is None:
+                    # Image agent enabled but no artifact produced - unsafe condition
+                    logger.error(f"任務 {task.id} 圖片生成已啟用但未產出 artifact，失敗關閉")
+                    task.final_failed_gate = "IMAGE_PREPARATION"
+                    task.final_error = "Image generation enabled but no artifact produced"
+                    task.final_feedback = "Image preparation failed: image agent enabled but returned no artifact"
+                    task.final_failure_category = FailureCategory.IMAGE.value
+                    task.failure_timestamp = datetime.datetime.now().isoformat()
+                    workflow_state.update_task_status(
+                        task_id,
+                        TaskStatus.FAILED_NEEDS_ATTENTION,
+                        error_message="Image preparation failed: no artifact produced"
+                    )
+                    return False
+                elif image_artifact.status != ImageArtifactStatus.READY:
+                    # FAILED, PENDING, or any non-READY status → hard stop
+                    logger.error(f"任務 {task.id} 圖片 artifact 狀態非 READY: {image_artifact.status.value}，失敗關閉")
+                    task.final_failed_gate = "IMAGE_PREPARATION"
+                    task.final_error = f"Image artifact status: {image_artifact.status.value}"
+                    if image_artifact.metadata and "error" in image_artifact.metadata:
+                        task.final_error = f"{task.final_error}: {image_artifact.metadata['error']}"
+                    task.final_feedback = f"Image preparation {image_artifact.status.value}. No hero image available for preview or publish."
+                    task.final_failure_category = FailureCategory.IMAGE.value
+                    task.failure_timestamp = datetime.datetime.now().isoformat()
+                    workflow_state.update_task_status(
+                        task_id,
+                        TaskStatus.FAILED_NEEDS_ATTENTION,
+                        error_message=f"Image preparation failed: {task.final_error}"
+                    )
+                    return False
+                # READY → continue to PreviewRenderer
+
                 # Phase 7D-1: Preview Rendering
                 workflow_state.update_task_status(task_id, TaskStatus.FRONTEND_PREVIEW_RENDERING)
                 preview_renderer = PreviewRenderer(config)
@@ -1158,10 +1199,36 @@ class AIWordPressFactory:
             logger.info(f"任務 {task.id} 圖片生成已禁用，跳過")
             return None
             
-        # Reuse existing READY artifact
-        if task.image_artifact:
-            existing_artifact = ImageArtifact.from_dict(task.image_artifact)
+        # Reuse existing artifact (handles malformed persisted artifact)
+        if task.image_artifact is not None:
+            try:
+                existing_artifact = ImageArtifact.from_dict(task.image_artifact)
+            except Exception as e:
+                # Malformed persisted artifact → treat as FAILED
+                logger.warning(f"任務 {task.id} 現有圖片 artifact 格式錯誤: {e}")
+                failed_artifact = create_image_artifact(
+                    status=ImageArtifactStatus.FAILED,
+                    metadata={"error": f"Malformed persisted ImageArtifact: {e}"}
+                )
+                task.image_artifact = failed_artifact.to_dict()
+                self.save_state()
+                return failed_artifact
+
             if existing_artifact.status == ImageArtifactStatus.READY:
+                if not self._is_usable_ready_image_artifact(existing_artifact):
+                    error = (
+                        "Malformed persisted ImageArtifact: READY artifact requires "
+                        "a WordPress media ID and a preview-resolvable image source"
+                    )
+                    logger.warning(f"任務 {task.id} 現有 READY 圖片 artifact 無法使用")
+                    failed_artifact = create_image_artifact(
+                        artifact_id=existing_artifact.artifact_id,
+                        status=ImageArtifactStatus.FAILED,
+                        metadata={"error": error},
+                    )
+                    task.image_artifact = failed_artifact.to_dict()
+                    self.save_state()
+                    return failed_artifact
                 logger.info(f"任務 {task.id} 重用現有 READY 圖片 artifact: {existing_artifact.artifact_id}")
                 return existing_artifact
             elif existing_artifact.status == ImageArtifactStatus.FAILED:
@@ -1212,7 +1279,7 @@ class AIWordPressFactory:
             task.hero_image_url = media_url
             task.image_status = "success"
         else:
-            # Failure - create FAILED artifact
+            # Failure - create FAILED artifact (includes WordPress upload failure with source_url)
             artifact = create_image_artifact(
                 status=ImageArtifactStatus.FAILED,
                 prompt=getattr(task, 'image_prompt', None),
@@ -1232,6 +1299,36 @@ class AIWordPressFactory:
             logger.warning(f"任務 {task.id} 圖片 artifact 創建失敗: {artifact.artifact_id}")
             
         return artifact
+
+    @staticmethod
+    def _is_usable_ready_image_artifact(artifact: ImageArtifact) -> bool:
+        """Return whether a persisted READY artifact is safe to preview and publish."""
+        if artifact.status != ImageArtifactStatus.READY or not artifact.wordpress_media_id:
+            return False
+        return bool(
+            artifact.wordpress_media_url
+            or artifact.source_url
+            or (
+                artifact.local_path
+                and Path(artifact.local_path).expanduser().is_file()
+            )
+        )
+
+    def _fail_approval_resume_image(self, task: Task, error: str) -> bool:
+        """Fail approval resume at the image boundary without rerunning production stages."""
+        task.image_status = "failed"
+        task.final_failed_gate = "IMAGE_PREPARATION"
+        task.final_error = error
+        task.final_feedback = f"Image preparation failed during approval resume: {error}"
+        task.final_failure_category = FailureCategory.IMAGE.value
+        task.failure_timestamp = datetime.datetime.now().isoformat()
+        workflow_state.update_task_status(
+            task.id,
+            TaskStatus.FAILED_NEEDS_ATTENTION,
+            error_message=f"Image preparation failed: {error}",
+        )
+        self.save_state()
+        return False
 
     def _resolve_approval_policy(self, task: Task) -> ApprovalPolicy:
         """Resolve the approval policy for a task.
@@ -1312,7 +1409,7 @@ class AIWordPressFactory:
             return True
 
     def _continue_post_approval(self, task_id: str) -> bool:
-        """Continue workflow after approval (ImageAgent -> Publisher -> COMPLETED).
+        """Continue workflow after approval by validating the reviewed artifact, then publishing.
         
         Args:
             task_id: The task ID.
@@ -1328,6 +1425,34 @@ class AIWordPressFactory:
         try:
             # Step 8: 圖片生成階段 - image artifact should already be prepared before preview
             # Use existing image artifact if available
+            if task.image_artifact is not None:
+                try:
+                    persisted_artifact = ImageArtifact.from_dict(task.image_artifact)
+                except Exception as e:
+                    error = f"Malformed persisted ImageArtifact: {e}"
+                    task.image_artifact = create_image_artifact(
+                        status=ImageArtifactStatus.FAILED,
+                        metadata={"error": error},
+                    ).to_dict()
+                    return self._fail_approval_resume_image(task, error)
+
+                if not self._is_usable_ready_image_artifact(persisted_artifact):
+                    if persisted_artifact.status == ImageArtifactStatus.READY:
+                        error = (
+                            "Malformed persisted ImageArtifact: READY artifact requires "
+                            "a WordPress media ID and a preview-resolvable image source"
+                        )
+                        task.image_artifact = create_image_artifact(
+                            artifact_id=persisted_artifact.artifact_id,
+                            status=ImageArtifactStatus.FAILED,
+                            metadata={"error": error},
+                        ).to_dict()
+                    else:
+                        error = f"Image artifact status: {persisted_artifact.status.value}"
+                        if persisted_artifact.metadata and "error" in persisted_artifact.metadata:
+                            error = f"{error}: {persisted_artifact.metadata['error']}"
+                    return self._fail_approval_resume_image(task, error)
+
             if task.image_artifact:
                 artifact = ImageArtifact.from_dict(task.image_artifact)
                 # Sync legacy fields for backward compatibility (should already be set)

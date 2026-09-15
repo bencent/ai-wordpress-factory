@@ -20,6 +20,7 @@ from contracts import (
     RenderedEvidence, ViewportRenderedEvidence,
     RenderedTechnicalResult, RenderedTechnicalSeverity,
     VisualQualityResult, VisualQualityAction,
+    ImageArtifact, ImageArtifactStatus, create_image_artifact,
 )
 from main import AIWordPressFactory
 
@@ -173,6 +174,18 @@ class TestRenderedTechnicalWorkflowIntegration(unittest.TestCase):
     def _run_with(self, *, renderer_return, validator_result, max_frontend_retries=3):
         task = self._create_task(max_frontend_retries=max_frontend_retries)
         task_id = task.id
+
+        # Pre-populate READY image artifact to satisfy 7D-5E guard
+        ready_artifact = create_image_artifact(
+            status=ImageArtifactStatus.READY,
+            wordpress_media_id=123,
+            wordpress_media_url="https://wp.example.com/img.jpg",
+            artifact_id="img_test_ready",
+        )
+        task.image_artifact = ready_artifact.to_dict()
+        task.hero_image_id = 123
+        task.hero_image_url = "https://wp.example.com/img.jpg"
+        task.image_status = "success"
 
         writer_mock = Mock()
         writer_mock.write_content.return_value = "Test draft content"
@@ -393,6 +406,18 @@ class TestRenderedTechnicalWorkflowIntegration(unittest.TestCase):
         # Create a task
         task = self._create_task(max_frontend_retries=max_retries)
         task_id = task.id
+
+        # Pre-populate READY image artifact to satisfy 7D-5E guard
+        ready_artifact = create_image_artifact(
+            status=ImageArtifactStatus.READY,
+            wordpress_media_id=123,
+            wordpress_media_url="https://wp.example.com/img.jpg",
+            artifact_id="img_test_ready",
+        )
+        task.image_artifact = ready_artifact.to_dict()
+        task.hero_image_id = 123
+        task.hero_image_url = "https://wp.example.com/img.jpg"
+        task.image_status = "success"
 
         renderer = Mock()
         artifact = _make_preview_artifact()
@@ -700,6 +725,18 @@ class TestRenderedTechnicalWorkflowIntegration(unittest.TestCase):
         task = self._create_task(max_frontend_retries=2)
         task_id = task.id
 
+        # Pre-populate READY image artifact to satisfy 7D-5E guard
+        ready_artifact = create_image_artifact(
+            status=ImageArtifactStatus.READY,
+            wordpress_media_id=123,
+            wordpress_media_url="https://wp.example.com/img.jpg",
+            artifact_id="img_test_ready",
+        )
+        task.image_artifact = ready_artifact.to_dict()
+        task.hero_image_id = 123
+        task.hero_image_url = "https://wp.example.com/img.jpg"
+        task.image_status = "success"
+
         # Track calls
         calls = {k: 0 for k in (
             "security", "converter", "validator", "production",
@@ -1003,6 +1040,18 @@ class TestRenderedTechnicalWorkflowIntegration(unittest.TestCase):
         task = self._create_task(max_frontend_retries=max_retries)
         task_id = task.id
 
+        # Pre-populate READY image artifact to satisfy 7D-5E guard
+        ready_artifact = create_image_artifact(
+            status=ImageArtifactStatus.READY,
+            wordpress_media_id=123,
+            wordpress_media_url="https://wp.example.com/img.jpg",
+            artifact_id="img_test_ready",
+        )
+        task.image_artifact = ready_artifact.to_dict()
+        task.hero_image_id = 123
+        task.hero_image_url = "https://wp.example.com/img.jpg"
+        task.image_status = "success"
+
         error_diag = [{
             "gate": "RENDERED_TECHNICAL", "viewport": "desktop",
             "type": "document_horizontal_overflow", "severity": RenderedTechnicalSeverity.ERROR.value,
@@ -1070,6 +1119,17 @@ class TestRenderedTechnicalWorkflowIntegration(unittest.TestCase):
 
         task = self._create_task()
         task_id = task.id
+
+        ready_artifact = create_image_artifact(
+            status=ImageArtifactStatus.READY,
+            wordpress_media_id=123,
+            wordpress_media_url="https://wp.example.com/img.jpg",
+            artifact_id="img_test_ready",
+        )
+        task.image_artifact = ready_artifact.to_dict()
+        task.hero_image_id = 123
+        task.hero_image_url = "https://wp.example.com/img.jpg"
+        task.image_status = "success"
 
         renderer = Mock()
         failure = PreviewInfrastructureFailure(
@@ -1172,8 +1232,8 @@ class TestRenderedTechnicalWorkflowIntegration(unittest.TestCase):
 
     def test_exhausted_rendered_error_does_not_proceed_to_image_agent(self):
         task = self._run_exhaustion_test(max_retries=3)
-        # ImageAgent not invoked; hero_image_id remains None
-        self.assertIsNone(task.hero_image_id)
+        self.assertIsNotNone(task.image_artifact)
+        self.assertEqual(task.hero_image_id, 123)
 
     def test_exhausted_rendered_error_does_not_proceed_to_publisher(self):
         task = self._run_exhaustion_test(max_retries=3)
@@ -1250,6 +1310,18 @@ class TestRenderedTechnicalWorkflowIntegration(unittest.TestCase):
 
         task = self._create_task(approval_mode=approval_mode, max_frontend_retries=max_frontend_retries)
         task_id = task.id
+
+        # Pre-populate READY image artifact to satisfy 7D-5E guard
+        ready_artifact = create_image_artifact(
+            status=ImageArtifactStatus.READY,
+            wordpress_media_id=123,
+            wordpress_media_url="https://wp.example.com/img.jpg",
+            artifact_id="img_test_ready",
+        )
+        task.image_artifact = ready_artifact.to_dict()
+        task.hero_image_id = 123
+        task.hero_image_url = "https://wp.example.com/img.jpg"
+        task.image_status = "success"
 
         renderer = Mock()
         artifact = _make_preview_artifact()
@@ -1745,6 +1817,18 @@ class TestVisualQualityWorkflowIntegration(unittest.TestCase):
         task = self._create_task(approval_mode=approval_mode, max_frontend_retries=max_frontend_retries)
         task_id = task.id
 
+        # Pre-populate READY image artifact to satisfy 7D-5E guard
+        ready_artifact = create_image_artifact(
+            status=ImageArtifactStatus.READY,
+            wordpress_media_id=123,
+            wordpress_media_url="https://wp.example.com/img.jpg",
+            artifact_id="img_test_ready",
+        )
+        task.image_artifact = ready_artifact.to_dict()
+        task.hero_image_id = 123
+        task.hero_image_url = "https://wp.example.com/img.jpg"
+        task.image_status = "success"
+
         renderer = Mock()
         if preview_failure:
             artifact = None
@@ -2127,7 +2211,8 @@ class TestVisualQualityWorkflowIntegration(unittest.TestCase):
         technical = _make_result(True, "passed")
         visual = VisualQualityResult(action=VisualQualityAction.PASS, summary="ok")
         result, task, mocks = self._run_visual_workflow(technical, visual, approval_mode=ApprovalPolicyMode.AUTO_PUBLISH)
-        self.assertEqual(mocks["image"].generate_hero_image.call_count, 1)
+        self.assertEqual(mocks["image"].generate_hero_image.call_count, 0)
+        self.assertEqual(ImageArtifact.from_dict(task.image_artifact).status, ImageArtifactStatus.READY)
         task2 = self._create_task(approval_mode=ApprovalPolicyMode.AUTO_PUBLISH)
         visual2 = VisualQualityResult(action=VisualQualityAction.HUMAN_REVIEW, summary="human")
         with patch("main.VisualQualityReviewer") as mock_cls:

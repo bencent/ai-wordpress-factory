@@ -2,10 +2,13 @@
 """Workflow integration tests for Phase 7C-2 frontend pipeline."""
 
 import unittest
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
+import base64
 import json
+import tempfile
+from pathlib import Path
 
-from state import Task, TaskStatus, ContentType, WorkflowState, workflow_state
+from state import Task, TaskStatus, ContentType, workflow_state
 from contracts import (
     FrontendRequest, FrontendResult, FrontendSecurityResult,
     GreenLightConversionResult, FrontendValidationResult,
@@ -14,6 +17,7 @@ from contracts import (
     BrandProductionRules, BrandProfile, ClientProfile,
     PreviewArtifact,
     VisualQualityResult, VisualQualityAction,
+    ImageArtifact, ImageArtifactStatus, create_image_artifact,
 )
 from main import AIWordPressFactory
 
@@ -28,6 +32,11 @@ class TestFrontendPipelineIntegration(unittest.TestCase):
         from state import workflow_state
         workflow_state.tasks.clear()
         workflow_state.current_task_id = None
+        self._temp_dir = tempfile.TemporaryDirectory()
+        self._hero_image_path = Path(self._temp_dir.name) / "hero.png"
+        self._hero_image_path.write_bytes(base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+        ))
 
         # Patch VisualQualityReviewer to always return PASS by default
         self._visual_reviewer_patcher = patch("main.VisualQualityReviewer")
@@ -40,6 +49,7 @@ class TestFrontendPipelineIntegration(unittest.TestCase):
 
     def tearDown(self):
         self._visual_reviewer_patcher.stop()
+        self._temp_dir.cleanup()
 
     def _create_test_task(self, **kwargs) -> Task:
         """Create a test task and return it."""
@@ -48,11 +58,24 @@ class TestFrontendPipelineIntegration(unittest.TestCase):
             description="A test blog post for frontend pipeline",
             content_type=ContentType.BLOG_POST,
         )
-        from state import workflow_state
         task = workflow_state.get_task(task_id)
         # Apply any custom attributes
         for key, value in kwargs.items():
             setattr(task, key, value)
+
+        # Pre-populate READY image artifact to satisfy 7D-5E guard
+        ready_artifact = create_image_artifact(
+            status=ImageArtifactStatus.READY,
+            wordpress_media_id=123,
+            wordpress_media_url="https://wp.example.com/img.jpg",
+            local_path=str(self._hero_image_path),
+            artifact_id="img_test_ready",
+        )
+        task.image_artifact = ready_artifact.to_dict()
+        task.hero_image_id = 123
+        task.hero_image_url = "https://wp.example.com/img.jpg"
+        task.image_status = "success"
+
         return task
 
     def _create_mock_agents(self, frontend_agent=None, publisher=None):

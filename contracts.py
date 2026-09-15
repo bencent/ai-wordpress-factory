@@ -515,6 +515,7 @@ class FailureCategory(str, Enum):
     """Failure category for distinguishing content vs infrastructure failures."""
     CONTENT = "content"
     INFRASTRUCTURE = "infrastructure"
+    IMAGE = "image"
 
 
 @dataclass
