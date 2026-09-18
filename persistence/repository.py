@@ -2,21 +2,29 @@
 from contextlib import contextmanager
 from typing import Protocol, ContextManager
 from domain.contracts import Task, TaskRun, TaskEvent, ContentVersion, Status
+from domain.providers import Workspace, AIProviderConnection, AIInvocation, DEFAULT_WORKSPACE_ID
 from .codec import encode_snapshot, decode_snapshot, record_to_mapping, record_from_mapping
 from .connection import PersistenceError
 from .worker_repository import WorkerRepositoryMixin
 from .execution_repository import ExecutionRepositoryMixin
 from domain.execution import RunLease
 
-RECORDS = {Task: ("tasks", "task_id"), TaskRun: ("task_runs", "run_id"),
+RECORDS = {Workspace: ("workspaces", "workspace_id"), AIProviderConnection: ("ai_provider_connections", "provider_connection_id"),
+           AIInvocation: ("ai_invocations", "invocation_id"), Task: ("tasks", "task_id"), TaskRun: ("task_runs", "run_id"),
            TaskEvent: ("task_events", "event_id"), ContentVersion: ("content_versions", "content_version_id")}
-JSON_FIELDS = {"request_snapshot", "approval_policy_snapshot", "client_brand_snapshot",
+JSON_FIELDS = {"capabilities", "non_secret_configuration", "request_snapshot", "approval_policy_snapshot", "client_brand_snapshot",
                "workflow_state", "error", "metadata", "validation_result", "image_data",
                "seo_metadata", "optimization_report", "taxonomy", "aeo_data", "geo_data",
                "structured_data", "source_references"}
 
 
 class Repository(Protocol):
+    def default_workspace(self) -> Workspace | None: ...
+    def invocations(self, run_id: str, *, limit: int = 100) -> list[AIInvocation]: ...
+    def update_workspace(self, record: Workspace) -> None: ...
+    def update_provider_connection(self, record: AIProviderConnection) -> None: ...
+    def delete_workspace(self, workspace_id: str) -> None: ...
+    def delete_provider_connection(self, provider_connection_id: str) -> None: ...
     def record_workflow_event(self, lease, event, snapshot, now) -> bool: ...
     def complete_content_version(self, lease, version, snapshot, now) -> bool: ...
     def claim_next_run(self, owner_id: str, now: str) -> RunLease | None: ...
@@ -26,9 +34,9 @@ class Repository(Protocol):
     def lease_finished(self, lease: RunLease) -> bool: ...
     def expire_stale_runs(self, cutoff: str, now: str) -> int: ...
     def assert_run_ownership(self, lease: RunLease, now: str) -> bool: ...
-    def find_by_submission_key(self, submission_key: str) -> Task | None: ...
+    def find_by_submission_key(self, submission_key: str, *, workspace_id: str = DEFAULT_WORKSPACE_ID) -> Task | None: ...
     def recent_tasks(self, *, limit: int, before: tuple[str, str] | None = None) -> list[Task]: ...
-    def add(self, record: Task | TaskRun | TaskEvent | ContentVersion) -> None: ...
+    def add(self, record: Task | TaskRun | TaskEvent | ContentVersion | Workspace | AIProviderConnection | AIInvocation) -> None: ...
     def get(self, cls, identifier): ...
     def update_run_snapshot(self, run_id: str, *, owner_id: str | None, fencing_token: int,
                             expected_status: Status, status: Status, updated_at: str,
@@ -78,9 +86,44 @@ class SQLiteRepository(ExecutionRepositoryMixin, WorkerRepositoryMixin):
         row = self._conn.execute(f"SELECT * FROM {table} WHERE {key}=?", (identifier,)).fetchone()
         return self._decode(cls, row)
 
-    def find_by_submission_key(self, submission_key):
-        row = self._conn.execute("SELECT * FROM tasks WHERE submission_key=?", (submission_key,)).fetchone()
+    def find_by_submission_key(self, submission_key, *, workspace_id=DEFAULT_WORKSPACE_ID):
+        row = self._conn.execute("SELECT * FROM tasks WHERE workspace_id=? AND submission_key=?", (workspace_id,submission_key)).fetchone()
         return self._decode(Task, row)
+
+    def default_workspace(self):
+        row = self._conn.execute("SELECT * FROM workspaces WHERE workspace_key='default'").fetchone()
+        return self._decode(Workspace, row)
+
+    def invocations(self, run_id, *, limit=100):
+        if type(limit) is not int or not 1 <= limit <= 1000:
+            raise ValueError('Invalid invocation limit')
+        rows = self._conn.execute('SELECT * FROM ai_invocations WHERE run_id=? ORDER BY created_at,invocation_id LIMIT ?', (run_id,limit))
+        return [self._decode(AIInvocation,row) for row in rows]
+
+    def update_workspace(self, record):
+        self._replace_configuration(record, Workspace)
+
+    def update_provider_connection(self, record):
+        self._replace_configuration(record, AIProviderConnection)
+
+    def _replace_configuration(self, record, expected):
+        self._write()
+        if type(record) is not expected:
+            raise TypeError('Invalid configuration record')
+        table,key = RECORDS[expected]
+        data = record_to_mapping(record)
+        immutable = {key,'workspace_id','workspace_key','created_at'}
+        fields = [name for name in data if name not in immutable]
+        values = [encode_snapshot(data[name]) if name in JSON_FIELDS else data[name] for name in fields]
+        self._conn.execute(f"UPDATE {table} SET {','.join(name+'=?' for name in fields)} WHERE {key}=?", (*values,data[key]))
+
+    def delete_workspace(self, workspace_id):
+        self._write()
+        self._conn.execute('DELETE FROM workspaces WHERE workspace_id=?', (workspace_id,))
+
+    def delete_provider_connection(self, provider_connection_id):
+        self._write()
+        self._conn.execute('DELETE FROM ai_provider_connections WHERE provider_connection_id=?', (provider_connection_id,))
 
     def recent_tasks(self, *, limit, before=None):
         if type(limit) is not int or not 1 <= limit <= 1001:

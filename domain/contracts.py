@@ -31,6 +31,7 @@ class RunMode(str, Enum):
 @dataclass(frozen=True, kw_only=True)
 class Task:
     task_id: str
+    workspace_id: str
     submission_key: str
     site_id: str
     content_type: ContentType
@@ -69,6 +70,11 @@ class TaskRun:
     error: dict[str, Any] | None = None
     resumed_from_run_id: str | None = None
     resumed_from_checkpoint_id: str | None = None
+    provider_connection_id: str | None = None
+    provider_type: str | None = None
+    provider_mode: str | None = None
+    model: str | None = None
+    provider_configuration_version: int | None = None
 
 
 @dataclass(frozen=True, kw_only=True)

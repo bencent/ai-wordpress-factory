@@ -1,4 +1,5 @@
 """Transactional forward-only migrations. Historical SQL must not be edited."""
+from contextlib import contextmanager
 import hashlib
 import re
 import sqlite3
@@ -19,10 +20,37 @@ def statements(script):
 
 
 def _authorize(action, arg1, arg2, database, source):
-    # Migrations cannot escape the runner-owned transaction or change PRAGMAs.
+    # SQLite ALTER TABLE may invoke read-only quick_check(table) internally.
+    # Its argument selects a table/check limit; it does not change a setting.
+    if action == sqlite3.SQLITE_PRAGMA and (arg1 or '').strip().casefold() == 'quick_check':
+        return sqlite3.SQLITE_OK
+    # Every other PRAGMA and transaction-control action remains forbidden.
     forbidden = (sqlite3.SQLITE_TRANSACTION, sqlite3.SQLITE_SAVEPOINT,
                  sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH, sqlite3.SQLITE_PRAGMA)
     return sqlite3.SQLITE_DENY if action in forbidden else sqlite3.SQLITE_OK
+
+
+@contextmanager
+def migration_transaction(factory):
+    # Rebuilding a referenced table requires FK enforcement off BEFORE BEGIN.
+    # Only this dedicated migration connection changes it; application connections stay ON.
+    with factory.connection() as conn:
+        conn.execute('PRAGMA foreign_keys=OFF')
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            try:
+                yield conn
+                if conn.execute('PRAGMA foreign_key_check').fetchone() is not None:
+                    raise PersistenceError('Migration foreign key validation failed')
+                conn.execute('COMMIT')
+            except BaseException:
+                if conn.in_transaction:
+                    conn.execute('ROLLBACK')
+                raise
+        finally:
+            conn.execute('PRAGMA foreign_keys=ON')
+            if conn.execute('PRAGMA foreign_keys').fetchone()[0] != 1:
+                raise PersistenceError('Migration foreign keys could not be restored')
 
 
 def migrate(factory, directory=None):
@@ -37,7 +65,7 @@ def migrate(factory, directory=None):
     if not versions or len(versions) != len(set(versions)):
         raise PersistenceError("Missing or duplicate migrations")
     factory.initialize()
-    with factory.transaction() as conn:
+    with migration_transaction(factory) as conn:
         conn.execute("CREATE TABLE IF NOT EXISTS schema_migrations "
                      "(version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at TEXT NOT NULL)")
         applied = dict(conn.execute("SELECT version, checksum FROM schema_migrations"))

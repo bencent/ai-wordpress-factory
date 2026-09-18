@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from domain.providers import DEFAULT_WORKSPACE_ID
 from domain.contracts import Task, TaskRun, TaskEvent, ContentVersion, ContentType, Status
 from persistence.codec import CodecError, encode_record, decode_record, decode_snapshot
 from persistence.connection import ConnectionFactory, PersistenceError, ConstraintViolation, DatabaseBusy
@@ -20,7 +21,7 @@ def store(tmp_path):
 
 
 def records(suffix='a', content_type=ContentType.POST):
-    task = Task(task_id=suffix, submission_key='key-'+suffix, site_id='site-'+suffix,
+    task = Task(task_id=suffix, workspace_id=DEFAULT_WORKSPACE_ID, submission_key='key-'+suffix, site_id='site-'+suffix,
                 content_type=content_type, topic='繁體中文主題', brief='內容需求',
                 brand_profile_id='brand', created_at='2026-09-17T00:00:00Z',
                 updated_at='2026-09-17T00:00:00Z',
@@ -64,9 +65,10 @@ def test_wal_fk_timeout_and_idempotent_migration(store):
         assert conn.execute('PRAGMA foreign_keys').fetchone()[0] == 1
         assert conn.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'
         assert conn.execute('PRAGMA busy_timeout').fetchone()[0] == 50
-        assert conn.execute('SELECT count(*) FROM schema_migrations').fetchone()[0] == 1
+        assert conn.execute('SELECT count(*) FROM schema_migrations').fetchone()[0] == 2
         assert {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")} == {
-            'schema_migrations', 'tasks', 'task_runs', 'task_events', 'content_versions'}
+            'schema_migrations', 'tasks', 'task_runs', 'task_events', 'content_versions',
+            'workspaces', 'ai_provider_connections', 'ai_invocations'}
 
 
 def test_transaction_rollback_all_records(store):
@@ -296,4 +298,4 @@ def test_concurrent_migrations_share_one_history(store):
         for future in futures:
             future.result(timeout=5)
     with store.factory.connection() as conn:
-        assert conn.execute('SELECT count(*) FROM schema_migrations').fetchone()[0] == 1
+        assert conn.execute('SELECT count(*) FROM schema_migrations').fetchone()[0] == 2

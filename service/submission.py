@@ -2,6 +2,7 @@
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from domain.providers import DEFAULT_WORKSPACE_ID
 from domain.contracts import Task, TaskRun, TaskEvent, ContentType, Status
 from domain.submission import (validate_submission, ValidationError, IdempotencyConflict,
                                SubmissionResult, SubmissionProfile, ProfileError, ProfileResolver)
@@ -46,7 +47,7 @@ class TaskSubmissionService:
                 return self._replay(existing, request)
             now = datetime.now(timezone.utc).isoformat(timespec='microseconds')
             task_id, run_id, event_id = (str(uuid4()) for _ in range(3))
-            task = Task(task_id=task_id, submission_key=submission_key,
+            task = Task(task_id=task_id, workspace_id=DEFAULT_WORKSPACE_ID, submission_key=submission_key,
                         site_id=request['site_id'], content_type=ContentType(request['content_type']),
                         topic=request['topic'], brief=request['brief'],
                         target_audience=request['target_audience'], page_purpose=request['page_purpose'],
