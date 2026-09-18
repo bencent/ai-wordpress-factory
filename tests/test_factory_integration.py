@@ -33,7 +33,9 @@ def store(tmp_path):
 def submit(store, key='a', kind='POST'):
     body={'site_id':'site','brand_profile_id':'brand','content_type':kind,
           'topic':'整合測試','brief':'這是驗證 Factory 真實執行路徑的完整需求說明。','target_audience':'讀者'}
-    if kind=='PAGE': body['page_purpose']='SERVICE'
+    if kind=='PAGE':
+        body['page_purpose']='SERVICE'
+        body.pop('target_audience')
     return TaskSubmissionService(store,lambda s,b:SubmissionProfile(
         site_id=s,brand_profile_id=b,client_profile_id=None,snapshot={})).submit(key,body).task
 
