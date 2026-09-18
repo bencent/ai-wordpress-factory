@@ -165,12 +165,15 @@ def test_concurrent_idempotency(store, same_body):
 def test_creation_failure_rolls_back(store, fail_at):
     class FailingStore:
         reader = store.reader
+        workspace_reader = store.workspace_reader
         @contextmanager
-        def transaction(self):
-            with store.transaction() as repo:
+        def workspace_transaction(self, workspace_id):
+            with store.workspace_transaction(workspace_id) as repo:
                 class Proxy:
                     calls = 0
                     find_by_submission_key = repo.find_by_submission_key
+                    workspace = repo.workspace
+                    get_provider_connection = repo.get_provider_connection
                     def add(self, record):
                         self.calls += 1
                         if self.calls == fail_at:

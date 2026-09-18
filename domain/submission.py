@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 from typing import Any, Protocol
 from domain.contracts import Task
+from domain.workspace import WorkspaceContext
 
 
 class ValidationError(ValueError):
@@ -22,6 +23,9 @@ class IdempotencyConflict(ValueError):
 class ProfileError(ValueError):
     code = "INVALID_PROFILE"
 
+    def __init__(self, *args):
+        super().__init__("Requested resources are unavailable")
+
 
 class TaskNotFound(LookupError):
     code = "TASK_NOT_FOUND"
@@ -41,10 +45,12 @@ class SubmissionProfile:
     client_profile_id: str | None
     snapshot: dict[str, Any]
     approval_mode: str = "REQUIRE_HUMAN_REVIEW"
+    workspace_id: str | None = None
+    provider_connection_id: str | None = None
 
 
 class ProfileResolver(Protocol):
-    def __call__(self, site_id: str, brand_profile_id: str) -> SubmissionProfile: ...
+    def __call__(self, context: WorkspaceContext, site_id: str, brand_profile_id: str) -> SubmissionProfile: ...
 
 
 @dataclass(frozen=True)

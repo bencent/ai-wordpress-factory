@@ -2,7 +2,7 @@
 from contextlib import contextmanager
 from typing import Protocol, ContextManager
 from domain.contracts import Task, TaskRun, TaskEvent, ContentVersion, Status
-from domain.providers import Workspace, AIProviderConnection, AIInvocation, DEFAULT_WORKSPACE_ID
+from domain.providers import Workspace, AIProviderConnection, AIInvocation
 from .codec import encode_snapshot, decode_snapshot, record_to_mapping, record_from_mapping
 from .connection import PersistenceError
 from .worker_repository import WorkerRepositoryMixin
@@ -34,7 +34,7 @@ class Repository(Protocol):
     def lease_finished(self, lease: RunLease) -> bool: ...
     def expire_stale_runs(self, cutoff: str, now: str) -> int: ...
     def assert_run_ownership(self, lease: RunLease, now: str) -> bool: ...
-    def find_by_submission_key(self, submission_key: str, *, workspace_id: str = DEFAULT_WORKSPACE_ID) -> Task | None: ...
+    def find_by_submission_key(self, workspace_id: str, submission_key: str) -> Task | None: ...
     def recent_tasks(self, *, limit: int, before: tuple[str, str] | None = None) -> list[Task]: ...
     def add(self, record: Task | TaskRun | TaskEvent | ContentVersion | Workspace | AIProviderConnection | AIInvocation) -> None: ...
     def get(self, cls, identifier): ...
@@ -47,11 +47,14 @@ class Repository(Protocol):
 
 
 class Store(Protocol):
+    def workspace_reader(self, workspace_id: str): ...
+    def workspace_transaction(self, workspace_id: str): ...
     def transaction(self) -> ContextManager[Repository]: ...
     def reader(self) -> ContextManager[Repository]: ...
 
 
-class SQLiteRepository(ExecutionRepositoryMixin, WorkerRepositoryMixin):
+class SQLiteInternalRepository(ExecutionRepositoryMixin, WorkerRepositoryMixin):
+    """Unscoped execution/configuration access. Not an application query interface."""
     def __init__(self, connection, *, writable=False):
         self._conn = connection
         self._writable = writable
@@ -86,7 +89,7 @@ class SQLiteRepository(ExecutionRepositoryMixin, WorkerRepositoryMixin):
         row = self._conn.execute(f"SELECT * FROM {table} WHERE {key}=?", (identifier,)).fetchone()
         return self._decode(cls, row)
 
-    def find_by_submission_key(self, submission_key, *, workspace_id=DEFAULT_WORKSPACE_ID):
+    def find_by_submission_key(self, workspace_id, submission_key):
         row = self._conn.execute("SELECT * FROM tasks WHERE workspace_id=? AND submission_key=?", (workspace_id,submission_key)).fetchone()
         return self._decode(Task, row)
 
@@ -179,6 +182,10 @@ class SQLiteRepository(ExecutionRepositoryMixin, WorkerRepositoryMixin):
              task_id, Status(expected_status).value)).rowcount == 1
 
 
+# Backwards-compatible internal name for existing Worker and persistence tests.
+SQLiteRepository = SQLiteInternalRepository
+
+
 class SQLiteStore:
     def __init__(self, factory):
         self.factory = factory
@@ -192,3 +199,16 @@ class SQLiteStore:
     def reader(self):
         with self.factory.connection() as conn:
             yield SQLiteRepository(conn)
+
+
+    @contextmanager
+    def workspace_reader(self, workspace_id):
+        from .scoped_repository import SQLiteWorkspaceRepository
+        with self.reader() as internal:
+            yield SQLiteWorkspaceRepository(internal,workspace_id)
+
+    @contextmanager
+    def workspace_transaction(self, workspace_id):
+        from .scoped_repository import SQLiteWorkspaceRepository
+        with self.transaction() as internal:
+            yield SQLiteWorkspaceRepository(internal,workspace_id)

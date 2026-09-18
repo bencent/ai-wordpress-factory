@@ -137,8 +137,8 @@ def test_submission_key_unique_within_workspace(store):
         repo.add(task)
         repo.add(second)
     with store.reader() as repo:
-        assert repo.find_by_submission_key(task.submission_key)==task
-        assert repo.find_by_submission_key(task.submission_key,workspace_id=other.workspace_id)==second
+        assert repo.find_by_submission_key(DEFAULT_WORKSPACE_ID,task.submission_key)==task
+        assert repo.find_by_submission_key(other.workspace_id,task.submission_key)==second
     with pytest.raises(ConstraintViolation):
         with store.transaction() as repo: repo.add(replace(second,task_id='third'))
 
