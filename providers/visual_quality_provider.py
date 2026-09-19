@@ -29,6 +29,10 @@ class VisualReviewResult:
     reviewer: Optional[str] = None
     error: Optional[str] = None
     raw_response: Optional[str] = None
+    model: Optional[str] = None
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    total_tokens: Optional[int] = None
     
     def __post_init__(self):
         if self.issues is None:
@@ -340,6 +344,11 @@ Return ONLY a JSON object with this exact structure:
             raw = response.choices[0].message.content
             result = self._parse_response(raw)
             result.raw_response = None
+            result.model = getattr(response,"model",None) or model
+            usage = getattr(response,"usage",None)
+            result.input_tokens = getattr(usage,"prompt_tokens",None)
+            result.output_tokens = getattr(usage,"completion_tokens",None)
+            result.total_tokens = getattr(usage,"total_tokens",None)
             if not result.success:
                 result.error = ProviderFailure(ErrorCode.INVALID_RESPONSE).safe_summary
             return result

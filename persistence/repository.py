@@ -7,6 +7,7 @@ from .codec import encode_snapshot, decode_snapshot, record_to_mapping, record_f
 from .connection import PersistenceError
 from .worker_repository import WorkerRepositoryMixin
 from .execution_repository import ExecutionRepositoryMixin
+from .provider_repository import ProviderRepositoryMixin
 from domain.execution import RunLease
 
 RECORDS = {Workspace: ("workspaces", "workspace_id"), AIProviderConnection: ("ai_provider_connections", "provider_connection_id"),
@@ -53,7 +54,7 @@ class Store(Protocol):
     def reader(self) -> ContextManager[Repository]: ...
 
 
-class SQLiteInternalRepository(ExecutionRepositoryMixin, WorkerRepositoryMixin):
+class SQLiteInternalRepository(ProviderRepositoryMixin, ExecutionRepositoryMixin, WorkerRepositoryMixin):
     """Unscoped execution/configuration access. Not an application query interface."""
     def __init__(self, connection, *, writable=False):
         self._conn = connection

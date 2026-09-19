@@ -8,6 +8,7 @@ class RunLease:
     task_id: str
     owner_id: str
     fencing_token: int
+    workspace_id: str
 
 
 class LeaseLost(RuntimeError):

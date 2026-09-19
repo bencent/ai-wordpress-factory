@@ -10,6 +10,8 @@ from domain.observer import ObserverError
 from service.execution import PersistingObserver, build_version, now
 from worker.claiming import LeaseService
 from worker.local_images import LocalImages
+from worker.providers import ProviderSession, GuardedObserver
+from providers.composition import provider_from_connection
 
 HUMAN = {'mode': 'REQUIRE_HUMAN_REVIEW'}
 LEGACY_HUMAN = ApprovalPolicy(mode=ApprovalPolicyMode.REQUIRE_HUMAN_REVIEW).to_dict()
@@ -83,7 +85,8 @@ def map_task(task):
 
 class FactoryAdapter:
     def __init__(self, store, config_resolver, image_root, *, factory_class=BackgroundFactory,
-                 image_downloader=None):
+                 image_downloader=None, provider_factory=provider_from_connection, credential_resolver=None):
+        self.provider_factory, self.credential_resolver = provider_factory, credential_resolver
         self.store, self.config_resolver, self.image_root = store, config_resolver, image_root
         if not issubclass(factory_class, BackgroundFactory):
             raise ValueError('BackgroundFactory is required')
@@ -92,8 +95,10 @@ class FactoryAdapter:
     def __call__(self, lease, cancelled):
         service = LeaseService(self.store)
         service.assert_active(lease)
-        with self.store.reader() as repo:
-            task, run = repo.get(Task, lease.task_id), repo.get(TaskRun, lease.run_id)
+        with self.store.workspace_reader(lease.workspace_id) as repo:
+            task, run = repo.get_task(lease.task_id), repo.get_run(lease.task_id,lease.run_id)
+        if task is None or run is None:
+            raise LeaseLost()
         if run.run_mode != RunMode.INITIAL or run.workflow_state is not None:
             raise ValueError('Checkpoint resume is unavailable in Phase 8.1')
         legacy = map_task(task)
@@ -103,17 +108,24 @@ class FactoryAdapter:
         cfg = deepcopy(cfg)
         # Worker agents never need WordPress credentials.
         cfg.wordpress_url = cfg.wordpress_username = cfg.wordpress_password = cfg.wordpress_app_password = ''
-        factory = self.factory_class.for_run(legacy, cfg)
+        session = ProviderSession(self.store,lease,run,cfg,provider_factory=self.provider_factory,
+                                  credential_resolver=self.credential_resolver)
+        cfg.openai_api_key = cfg.search_api_key = None
+        factory = self.factory_class.for_run(legacy, cfg,providers=session.bundle,
+                                            workspace_id=lease.workspace_id,run_id=lease.run_id)
         options = {} if self.image_downloader is None else {'downloader': self.image_downloader}
         images = LocalImages(self.image_root, task.site_id, task.task_id, run.run_id, **options)
         factory.images = images
         observer = PersistingObserver(self.store, lease, cancelled, images)
         try:
-            factory.run_workflow(task.task_id, observer=observer)
+            factory.run_workflow(task.task_id, observer=GuardedObserver(session,observer))
         except ObserverError:
+            if session.failure is not None:
+                raise session.failure
             if observer.error is not None:
                 raise observer.error
             raise
+        session.check()
         if cancelled.is_set():
             raise LeaseLost()
         legacy = factory.state.get_task(task.task_id)

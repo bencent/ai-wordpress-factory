@@ -24,13 +24,13 @@ class WorkerRepositoryMixin:
         return self._conn.execute(
             'SELECT r.* FROM task_runs r JOIN tasks t ON t.task_id=r.task_id '
             'WHERE r.run_id=? AND r.task_id=? AND r.owner_id=? AND r.fencing_token=? AND r.status=? '
-            'AND t.current_run_id=r.run_id AND t.status=r.status',
-            (lease.run_id,lease.task_id,lease.owner_id,lease.fencing_token,Status(expected_status).value)).fetchone()
+            'AND t.workspace_id=? AND t.current_run_id=r.run_id AND t.status=r.status',
+            (lease.run_id,lease.task_id,lease.owner_id,lease.fencing_token,Status(expected_status).value,lease.workspace_id)).fetchone()
 
     def _reject(self, lease, now, operation):
         # Deduplicate repeated stale updates, not normal heartbeat traffic.
-        run = self._conn.execute('SELECT * FROM task_runs WHERE run_id=? AND task_id=?',
-                                 (lease.run_id,lease.task_id)).fetchone()
+        run = self._conn.execute('SELECT r.* FROM task_runs r JOIN tasks t ON t.task_id=r.task_id WHERE r.run_id=? AND r.task_id=? AND t.workspace_id=?',
+                                 (lease.run_id,lease.task_id,lease.workspace_id)).fetchone()
         if run is not None:
             key = f'rejected:{lease.run_id}:{lease.owner_id}:{lease.fencing_token}:{operation}'
             self._run_event(run,'WORKER_UPDATE_REJECTED',now,key=key,
@@ -42,7 +42,7 @@ class WorkerRepositoryMixin:
         if self._conn.execute("SELECT 1 FROM task_runs WHERE status IN ('CLAIMED','RUNNING') LIMIT 1").fetchone():
             return None
         row = self._conn.execute(
-            "SELECT r.* FROM task_runs r JOIN tasks t ON t.task_id=r.task_id "
+            "SELECT r.*,t.workspace_id FROM task_runs r JOIN tasks t ON t.task_id=r.task_id "
             "WHERE r.status='QUEUED' AND t.status='QUEUED' AND t.current_run_id=r.run_id "
             "ORDER BY r.created_at,r.run_id LIMIT 1").fetchone()
         if row is None:
@@ -61,7 +61,7 @@ class WorkerRepositoryMixin:
             raise PersistenceError('Task and run claim disagree')
         run = self._conn.execute('SELECT * FROM task_runs WHERE run_id=?',(row['run_id'],)).fetchone()
         self._run_event(run,'RUN_CLAIMED',now)
-        return RunLease(run['run_id'],run['task_id'],owner_id,token)
+        return RunLease(run['run_id'],run['task_id'],owner_id,token,row['workspace_id'])
 
     def start_run(self, lease, now):
         self._write()
@@ -93,8 +93,8 @@ class WorkerRepositoryMixin:
             "SELECT 1 FROM task_runs r JOIN tasks t ON t.task_id=r.task_id "
             "WHERE r.run_id=? AND r.task_id=? AND r.owner_id=? AND r.fencing_token=? "
             "AND r.status IN ('FAILED','AWAITING_APPROVAL') "
-            "AND t.current_run_id=r.run_id AND t.status=r.status",
-            (lease.run_id,lease.task_id,lease.owner_id,lease.fencing_token)).fetchone() is not None
+            "AND t.workspace_id=? AND t.current_run_id=r.run_id AND t.status=r.status",
+            (lease.run_id,lease.task_id,lease.owner_id,lease.fencing_token,lease.workspace_id)).fetchone() is not None
 
     def fail_run(self, lease, now, error_code):
         self._write()
@@ -102,18 +102,23 @@ class WorkerRepositoryMixin:
         if row is None:
             self._reject(lease,now,'fail')
             return False
+        from domain.ai_runtime import ErrorCode
+        safe_codes = {c.value for c in ErrorCode} | {'AI_INVOCATION_PERSISTENCE_FAILED','EXECUTOR_FAILED',
+            'EXECUTOR_INCOMPLETE','EXECUTOR_CANCELLED','FACTORY_VALIDATION_FAILED'}
+        if error_code not in safe_codes:
+            raise ValueError('Unsupported safe error code')
         error = encode_snapshot({'code':error_code,'summary':'任務執行未完成'})
         self._conn.execute("UPDATE task_runs SET status='FAILED',finished_at=?,updated_at=?,error=? WHERE run_id=?",
                            (now,now,error,lease.run_id))
         self._conn.execute("UPDATE tasks SET status='FAILED',updated_at=? WHERE task_id=?",(now,lease.task_id))
         run = self._conn.execute('SELECT * FROM task_runs WHERE run_id=?',(lease.run_id,)).fetchone()
-        self._run_event(run,'RUN_FAILED',now,summary='任務執行失敗')
+        self._run_event(run,'RUN_FAILED',now,summary=error_code)
         return True
 
     def expire_stale_runs(self, cutoff, now):
         self._write()
         rows = self._conn.execute(
-            "SELECT r.* FROM task_runs r JOIN tasks t ON t.task_id=r.task_id "
+            "SELECT r.*,t.workspace_id FROM task_runs r JOIN tasks t ON t.task_id=r.task_id "
             "WHERE r.status IN ('CLAIMED','RUNNING') AND t.current_run_id=r.run_id "
             "AND t.status=r.status AND COALESCE(r.heartbeat_at,r.claimed_at,r.created_at) <= ?",
             (cutoff,)).fetchall()

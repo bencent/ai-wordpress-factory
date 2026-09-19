@@ -74,7 +74,8 @@ def reset():
 
 def adapter(store,tmp_path,enabled=True):
     return FactoryAdapter(store,lambda site:Config(agents={'image':{'enabled':enabled}}),
-        tmp_path/'images',factory_class=Harness,image_downloader=lambda url:PNG)
+        tmp_path/'images',factory_class=Harness,image_downloader=lambda url:PNG,
+        credential_resolver=Mock(resolve=Mock(return_value='fixture-only-key')))
 
 def read(store,task):
     with store.reader() as repo:

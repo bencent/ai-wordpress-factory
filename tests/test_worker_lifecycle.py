@@ -238,7 +238,7 @@ def test_terminal_adapter_result_is_not_overwritten(store):
     worker.run_once()
     run=read_run(store,task)
     assert run.error['code']=='EXECUTOR_FAILED'
-    lease=RunLease(run.run_id,run.task_id,run.owner_id,run.fencing_token)
+    lease=RunLease(run.run_id,run.task_id,run.owner_id,run.fencing_token,task.workspace_id)
     assert LeaseService(store).heartbeat(lease) is False
 
 

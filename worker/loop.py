@@ -11,6 +11,8 @@ from persistence.connection import PersistenceError
 from persistence.codec import CodecError
 from .claiming import LeaseService
 from .heartbeat import Heartbeat
+from domain.ai_runtime import ProviderFailure
+from worker.providers import InvocationPersistenceFailed
 
 
 class Worker:
@@ -55,7 +57,10 @@ class Worker:
             if self.service.finished(lease):
                 return True
             try:
-                self.service.fail(lease,'EXECUTOR_FAILED' if failure else 'EXECUTOR_INCOMPLETE')
+                code = ('AI_INVOCATION_PERSISTENCE_FAILED' if isinstance(failure,InvocationPersistenceFailed) else
+                        failure.code.value if isinstance(failure,ProviderFailure) else
+                        'EXECUTOR_FAILED' if failure else 'EXECUTOR_INCOMPLETE')
+                self.service.fail(lease,code)
             except LeaseLost:
                 pass  # Rejection has been persisted; do not revive the expired Run.
             return True
