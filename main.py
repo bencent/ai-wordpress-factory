@@ -15,6 +15,9 @@ import sys
 from pathlib import Path
 
 from config import Config, config, load_config_from_file
+from domain.ai_runtime import RunContext, ProviderBundle, classify_error
+from domain.agent_settings import agent_settings
+from providers.composition import legacy_provider_bundle, legacy_media_upload
 from state import (
     workflow_state,
     Task,
@@ -59,7 +62,8 @@ class AIWordPressFactory:
     """AI WordPress Factory 主類，協調所有模組的工作流程。"""
 
     def __init__(self, config_path: Optional[str] = None, *,
-                 runtime_config: Optional[Config] = None, state: Optional[WorkflowState] = None):
+                 runtime_config: Optional[Config] = None, state: Optional[WorkflowState] = None,
+                 providers: Optional[ProviderBundle] = None):
         """Legacy CLI by default; explicit config/state selects isolated execution.
 
         Injected values are copied so agents cannot mutate the caller or another run.
@@ -83,14 +87,20 @@ class AIWordPressFactory:
             else:
                 from config import load_config_from_env
                 load_config_from_env()
+        self.providers = providers if providers is not None else legacy_provider_bundle(self.runtime_config)
+        self.run_context = None
         logger.info("AI WordPress Factory 初始化完成")
 
     @classmethod
-    def for_run(cls, task: Task, runtime_config: Config):
+    def for_run(cls, task: Task, runtime_config: Config, *, providers=None,
+                workspace_id=None, run_id=None, observer=None):
         """Fresh context for one execution; no global state or config loader mutation."""
         state = WorkflowState()
         state.add_task(task)
-        return cls(runtime_config=runtime_config, state=state)
+        factory = cls(runtime_config=runtime_config, state=state, providers=providers)
+        factory.run_context = RunContext(workspace_id or "legacy-local",task.id,run_id or str(uuid.uuid4()),
+                                         factory.state,observer or NoOpObserver(),factory.providers)
+        return factory
 
     @property
     def state(self):
@@ -143,7 +153,7 @@ class AIWordPressFactory:
             if task is None:
                 return False
             self.state.set_current_task(task_id)
-            self._observer = observer if observer is not None else NoOpObserver()
+            self._observer = observer if observer is not None else (self.run_context.observer if self.run_context else NoOpObserver())
             self._observing_task = task
             self._workflow_id = str(uuid.uuid4())
             self._sequence = 0
@@ -914,7 +924,13 @@ class AIWordPressFactory:
         if not enabled:
             return None
         
-        return agent_class(self.runtime_config)
+        if agent_type == "publisher":
+            return agent_class(self.runtime_config)
+        settings = agent_settings(self.runtime_config)
+        if agent_type == "image":
+            return agent_class(settings,providers=self.providers,
+                               upload_media=legacy_media_upload(self.runtime_config))
+        return agent_class(settings,providers=self.providers)
 
     def _apply_critique(self, task: Task, content: str, critique: CritiqueResult) -> str:
         """根據批評結果修改內容。
@@ -1288,7 +1304,7 @@ class AIWordPressFactory:
     ) -> VisualQualityResult:
         self.state.update_task_status(task.id, TaskStatus.FRONTEND_VISUAL_REVIEW)
         try:
-            reviewer = VisualQualityReviewer(self.runtime_config)
+            reviewer = VisualQualityReviewer(agent_settings(self.runtime_config),providers=self.providers)
             result = reviewer.review(preview_artifact)
             result_data = result.to_dict()
         except ObserverError:
@@ -1296,7 +1312,7 @@ class AIWordPressFactory:
         except Exception as exc:
             result = VisualQualityResult(
                 action=VisualQualityAction.HUMAN_REVIEW,
-                summary=f"Visual review failed: {exc}",
+                summary=f"Visual review failed: {classify_error(exc).safe_summary}",
                 issues=[],
                 reviewed_viewports=[],
                 reviewer="visual_quality_reviewer",

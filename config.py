@@ -43,7 +43,8 @@ class Config:
 
     def __post_init__(self):
         """初始化後加載環境變量中的配置。"""
-        self.openai_api_key = os.getenv("OPENAI_API_KEY", self.openai_api_key)
+        if self.openai_api_key is None:
+            self.openai_api_key = os.getenv("OPENAI_API_KEY")
         self.wordpress_url = os.getenv("WORDPRESS_URL", self.wordpress_url)
         self.wordpress_username = os.getenv("WORDPRESS_USERNAME", self.wordpress_username)
         self.wordpress_password = os.getenv("WORDPRESS_PASSWORD", self.wordpress_password)

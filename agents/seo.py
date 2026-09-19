@@ -10,8 +10,8 @@ from . import BaseAgent
 class SEOAgent(BaseAgent):
     """SEO 代理人，負責優化內容的 SEO 屬性，包括標題、描述、關鍵字等。"""
 
-    def __init__(self, config):
-        super().__init__(config)
+    def __init__(self, config, *, providers=None):
+        super().__init__(config, providers=providers)
         self.description = "負責優化內容的 SEO 屬性，包括標題、描述、關鍵字、內部鏈接等。"
 
     def optimize_content(self, task: Task) -> Tuple[str, Dict[str, Any]]:

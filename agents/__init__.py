@@ -4,6 +4,9 @@
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
 from skills.loader import skill_loader
+from domain.agent_settings import agent_settings
+from domain.ai_runtime import (ProviderBundle, MissingTextProvider, TextRequest, TextResult,
+                               ProviderFailure, ErrorCode, classify_error)
 
 
 @dataclass
@@ -25,13 +28,15 @@ class AgentConfig:
 class BaseAgent:
     """代理人基類，提供共同的功能。"""
     
-    def __init__(self, config):
+    def __init__(self, config, *, providers=None):
         """初始化代理人。
         
         Args:
             config: 全局配置或代理人配置。
         """
-        self.config = config
+        self.config = agent_settings(config)
+        self._providers = providers if providers is not None else ProviderBundle(MissingTextProvider())
+        self.last_ai_result = None
         self.name = self.__class__.__name__.replace("Agent", "").lower()
         self.skills_context = skill_loader.build_skills_context(self.name)
         self.constitution_context = skill_loader.build_constitution_context()
@@ -63,7 +68,6 @@ class BaseAgent:
         Returns:
             str: AI 生成的文本。
         """
-        import openai
         
         if required_skills is not None:
             skills_context = skill_loader.build_skills_context(self.name, required_skills=required_skills)
@@ -74,24 +78,18 @@ class BaseAgent:
         if skills_context:
             full_prompt = f"{skills_context}\n\n{prompt}"
         
-        api_key = getattr(self.config, "openai_api_key", None)
-        if not api_key:
-            raise ValueError("OpenAI API Key 未配置")
-        
-        client = openai.OpenAI(api_key=api_key)
-        
-        model = kwargs.get("model", getattr(self.config, "ai_model", "gpt-4"))
-        temperature = kwargs.get("temperature", getattr(self.config, "ai_temperature", 0.7))
-        max_tokens = kwargs.get("max_tokens", getattr(self.config, "ai_max_tokens", 2000))
-        
-        response = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": full_prompt}],
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-        
-        return response.choices[0].message.content
+        temperature = kwargs.get('temperature',self.config.ai_temperature)
+        max_tokens = kwargs.get('max_tokens',self.config.ai_max_tokens)
+        self.last_ai_result = None
+        try:
+            result = self._providers.text.complete(TextRequest(full_prompt,temperature,max_tokens))
+            if not isinstance(result,TextResult):
+                raise ProviderFailure(ErrorCode.INVALID_RESPONSE)
+        except Exception as error:
+            raise classify_error(error) from None
+        self.last_ai_result = result
+        return result.content
+
 
 
 # 導出所有代理人

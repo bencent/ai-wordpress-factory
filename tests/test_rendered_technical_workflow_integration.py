@@ -2134,15 +2134,45 @@ class TestVisualQualityWorkflowIntegration(unittest.TestCase):
 
     # FAILURE SAFETY
     def test_provider_failure_result_awaits_approval(self):
-        technical = _make_result(True, "passed")
+        from persistence.codec import encode_snapshot
+
+        raw_error = "Provider API error"
         visual_reviewer = Mock()
-        visual_reviewer.review.side_effect = Exception("Provider API error")
+        visual_reviewer.review.side_effect = Exception(raw_error)
         task = self._create_task()
         preview = _make_preview_artifact(task_id=task.id)
+        observer = Mock()
+
+        def review_step(factory, task_id):
+            with factory._agent_step(task, "visual_quality"):
+                factory._run_visual_quality_review(task, preview)
+            return False
+
         with patch("main.VisualQualityReviewer", return_value=visual_reviewer):
-            self.factory._run_visual_quality_review(task, preview)
-        self.assertEqual(task.visual_quality_result["action"], "human_review")
-        self.assertIn("Provider API error", task.visual_quality_result["summary"])
+            self.factory._observe_workflow(review_step, task.id, observer=observer)
+        result = task.visual_quality_result
+        self.assertEqual(result["action"], "human_review")
+        self.assertIn("Visual review failed", result["summary"])
+        # VisualQualityResult currently has no separate error-code field.
+        self.assertIn("UNKNOWN", result["summary"])
+        self.assertNotIn(raw_error, result["summary"])
+        self.assertNotIn(raw_error, encode_snapshot(self.factory.state.to_dict()))
+        self.assertNotIn(raw_error, encode_snapshot(task.to_dict()))
+        self.assertNotIn(raw_error, encode_snapshot(task.visual_quality_history))
+        self.assertGreater(observer.on_event.call_count, 0)
+        for call in observer.on_event.call_args_list:
+            self.assertNotIn(raw_error, encode_snapshot(vars(call.args[0])))
+
+        # The sanitized result retains existing routing, even for AUTO_PUBLISH.
+        visual = VisualQualityResult(action=VisualQualityAction.HUMAN_REVIEW,
+                                     summary=result["summary"])
+        completed, routed_task, mocks = self._run_visual_workflow(
+            _make_result(True, "passed"), visual,
+            approval_mode=ApprovalPolicyMode.AUTO_PUBLISH)
+        self.assertFalse(completed)
+        self.assertEqual(routed_task.status, TaskStatus.AWAITING_APPROVAL)
+        self.assertFalse(mocks["publisher"].publish_content.called)
+        self.assertNotIn(raw_error, encode_snapshot(routed_task.to_dict()))
 
     def test_malformed_output_result_awaits_approval(self):
         # Provider returns failure due to malformed model output => reviewer maps to HUMAN_REVIEW

@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
 from contracts import PreviewArtifact, VisualQualityResult, VisualQualityAction, VisualQualityIssue, VisualIssueCategory, VisualIssueSeverity
+from domain.ai_runtime import RuntimeOnly, classify_error, ProviderFailure, ErrorCode
 import base64
 import json
 
@@ -52,11 +53,14 @@ class VisualQualityProvider(ABC):
         raise NotImplementedError
 
 
-class OpenAIVisualQualityProvider(VisualQualityProvider):
+class OpenAIVisualQualityProvider(VisualQualityProvider, RuntimeOnly):
     """OpenAI GPT-4V 視覺品質審查提供者。"""
     
     def __init__(self, config):
-        self.config = config
+        self.__api_key = getattr(config,"openai_api_key",None)
+        self.__model = getattr(config,"visual_quality_model","gpt-4o")
+        self.__temperature = getattr(config,"visual_quality_temperature",0.3)
+        self.__max_tokens = getattr(config,"visual_quality_max_tokens",2000)
     
     def _encode_image(self, image_path: str) -> str:
         """將圖片編碼為 base64。"""
@@ -306,24 +310,24 @@ Return ONLY a JSON object with this exact structure:
     def review(self, request: VisualReviewRequest) -> VisualReviewResult:
         """執行視覺品質審查。"""
         try:
-            import openai
+            from providers.sdk_client import create_client
             
-            api_key = getattr(self.config, "openai_api_key", None)
+            api_key = self.__api_key
             if not api_key:
                 return VisualReviewResult(
                     success=False,
-                    error="OpenAI API Key 未配置",
+                    error=ProviderFailure(ErrorCode.AUTHENTICATION).safe_summary,
                 )
             
-            client = openai.OpenAI(api_key=api_key)
+            client = create_client(api_key)
             
             # 構建訊息
             messages = self._build_messages(request)
             
             # 調用模型
-            model = getattr(self.config, "visual_quality_model", "gpt-4o")
-            temperature = getattr(self.config, "visual_quality_temperature", 0.3)
-            max_tokens = getattr(self.config, "visual_quality_max_tokens", 2000)
+            model = self.__model
+            temperature = self.__temperature
+            max_tokens = self.__max_tokens
             
             response = client.chat.completions.create(
                 model=model,
@@ -334,12 +338,16 @@ Return ONLY a JSON object with this exact structure:
             )
             
             raw = response.choices[0].message.content
-            return self._parse_response(raw)
+            result = self._parse_response(raw)
+            result.raw_response = None
+            if not result.success:
+                result.error = ProviderFailure(ErrorCode.INVALID_RESPONSE).safe_summary
+            return result
             
         except Exception as e:
             return VisualReviewResult(
                 success=False,
-                error=str(e),
+                error=classify_error(e).safe_summary,
             )
 
 
@@ -350,3 +358,7 @@ def create_visual_quality_provider(config) -> VisualQualityProvider:
         return OpenAIVisualQualityProvider(config)
     else:
         raise ValueError(f"Unknown visual quality provider: {provider_type}")
+
+class MissingVisualQualityProvider(VisualQualityProvider, RuntimeOnly):
+    def review(self, request):
+        return VisualReviewResult(success=False,error=ProviderFailure(ErrorCode.UNSUPPORTED_CAPABILITY).safe_summary)

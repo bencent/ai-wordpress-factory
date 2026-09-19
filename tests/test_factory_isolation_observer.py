@@ -211,10 +211,85 @@ def test_unknown_task_does_not_leave_lock_held():
 
 
 def test_agent_receives_run_config_copy():
-    factory,task,_ = context()
+    from domain.ai_runtime import ProviderBundle, TextResult
+    from persistence.codec import encode_snapshot
+
+    class FakeTextProvider:
+        def __init__(self):
+            self.client = object()  # Opaque SDK stand-in, never copied or serialized.
+
+        def __deepcopy__(self, memo):
+            raise AssertionError('Provider must retain injected identity')
+
+        def complete(self, request):
+            return TextResult('offline result', 'FAKE', 'fixture-model')
+
+    _,task,helper = context()
+    cfg = Config(ai_model='fixture-model', ai_temperature=0.2, ai_max_tokens=731,
+                 max_retries=2, allowed_domains=['example.org'], frontend_max_html_size=4321)
+    credentials = ('openai_api_key', 'wordpress_password', 'wordpress_app_password', 'search_api_key')
+    secret = 'fixture-sensitive-value'
+    for name in credentials:
+        setattr(cfg, name, secret)
+    provider = FakeTextProvider()
+    bundle = ProviderBundle(provider)
+    recorder = Recorder()
+    factory = AIWordPressFactory.for_run(task, cfg, providers=bundle,
+        workspace_id='workspace-test', run_id='run-test', observer=recorder)
+    helper.factory = factory
+    task = factory.state.get_task(task.id)
+
     with patch('agents.planner.PlannerAgent') as agent:
         factory._get_agent('planner')
-        agent.assert_called_once_with(factory.runtime_config)
+        agent.assert_called_once()
+        view = agent.call_args.args[0]
+        assert view is not factory.runtime_config and view is not cfg
+        assert type(view) is not Config
+        assert view.ai_model == 'fixture-model'
+        assert view.ai_temperature == 0.2
+        assert view.ai_max_tokens == 731
+        assert view.max_retries == 2
+        assert view.frontend_max_html_size == 4321
+        assert view.allowed_domains == ['example.org']
+        assert view.agents['planner']['enabled'] is True
+        # Timeout is not an Agent Config field; SDK timeout belongs to the provider.
+        assert not hasattr(view, 'timeout')
+        for name in credentials:
+            assert not hasattr(view, name)
+            with pytest.raises(AttributeError):
+                getattr(view, name)
+        assert agent.call_args.kwargs['providers'] is bundle
+        assert agent.call_args.kwargs['providers'].text is provider
+        assert factory.run_context.providers is bundle
+        assert factory.providers.text.client is provider.client
+        view.allowed_domains.append('view-only.example')
+        view.agents['planner']['enabled'] = False
+        assert factory.runtime_config.allowed_domains == ['example.org']
+        assert factory.runtime_config.agents['planner']['enabled'] is True
+
+    def assert_plain(value):
+        assert value is not bundle and value is not provider and value is not provider.client
+        if type(value) is dict:
+            for key, item in value.items():
+                assert type(key) is str
+                assert_plain(item)
+        elif type(value) is list:
+            for item in value:
+                assert_plain(item)
+        else:
+            assert value is None or type(value) in (str, int, float, bool)
+            assert value != secret
+
+    with ExitStack() as stack:
+        helper._install_frontend_mocks(stack, task)
+        assert factory.run_workflow(task.id) is False
+    assert recorder.events
+    assert_plain(factory.state.to_dict())
+    assert secret not in encode_snapshot(factory.state.to_dict())
+    for event in recorder.events:
+        assert_plain(vars(event))
+        assert secret not in encode_snapshot(event.snapshot)
+    assert factory.providers is bundle and factory.providers.text is provider
     assert factory.runtime_config is not main.config
 
 
