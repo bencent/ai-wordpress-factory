@@ -2,6 +2,7 @@
 import json
 import socket
 import threading
+import time
 from html.parser import HTMLParser
 from pathlib import Path
 from unittest.mock import Mock
@@ -56,6 +57,84 @@ class ShellService:
 
     def status(self):
         return {"api": "ONLINE", "database": "AVAILABLE", "worker": {"status": "UNKNOWN"}}
+
+    def list(self, limit=50, cursor=None):
+        return {"tasks": [], "next_cursor": None}
+
+    def create(self, key, body):
+        raise AssertionError("7A shell smoke must not submit tasks")
+
+    def get(self, task_id):
+        raise AssertionError("7A shell smoke must not load task detail")
+
+    def events(self, task_id, after_sequence=0):
+        return {"events": [], "last_sequence": after_sequence}
+
+
+class InteractiveShellService(ShellService):
+    def __init__(self):
+        self.created_at = "2026-09-20T08:00:00+00:00"
+        self.tasks = [self._task("task-a", "較慢的任務"), self._task("task-b", "目前選取任務")]
+        self.create_calls = []
+        self.list_calls = []
+        self.get_calls = []
+        self.event_calls = []
+
+    def _task(self, task_id, topic, content_type="POST"):
+        return {
+            "task_id": task_id,
+            "site_id": "site",
+            "topic": topic,
+            "content_type": content_type,
+            "status": "QUEUED",
+            "created_at": self.created_at,
+            "updated_at": self.created_at,
+            "current_run_id": f"run-{task_id}",
+            "latest_content_version_id": None,
+        }
+
+    def create(self, key, body):
+        time.sleep(0.15)
+        self.create_calls.append((key, dict(body)))
+        task = self._task(f"task-created-{len(self.create_calls)}", body["topic"], body["content_type"])
+        self.tasks.insert(0, task)
+        return task, True
+
+    def list(self, limit=50, cursor=None):
+        self.list_calls.append((limit, cursor))
+        if cursor is not None:
+            return {"tasks": [self._task("task-more", "載入更多任務", "PAGE")], "next_cursor": None}
+        return {"tasks": list(self.tasks), "next_cursor": "opaque+/=cursor"}
+
+    def get(self, task_id):
+        self.get_calls.append(task_id)
+        if task_id == "task-a":
+            time.sleep(0.3)
+        task = next(task for task in self.tasks if task["task_id"] == task_id)
+        return task | {"current_run": {
+            "run_id": f"run-{task_id}", "attempt": 1, "status": "QUEUED",
+            "created_at": self.created_at, "started_at": None, "finished_at": None, "error_code": None,
+        }}
+
+    def events(self, task_id, after_sequence=0):
+        self.event_calls.append((task_id, after_sequence))
+        if after_sequence == 0:
+            events = [
+                self._event(task_id, 2, "第二筆事件"),
+                self._event(task_id, 1, '<img src=x onerror="window.injected=true">使用者事件'),
+            ]
+            return {"events": events, "last_sequence": 2}
+        if after_sequence == 2:
+            return {"events": [self._event(task_id, 3, "第三筆事件")], "last_sequence": 3}
+        return {"events": [], "last_sequence": after_sequence}
+
+    def _event(self, task_id, sequence, summary):
+        return {
+            "event_id": f"{task_id}-event-{sequence}", "task_id": task_id, "run_id": f"run-{task_id}",
+            "sequence_number": sequence, "type": "TASK_UPDATED", "status": "QUEUED", "attempt": 1,
+            "summary": summary, "metadata": {"stage": "writer", "agent": "writer", "attempt": 1},
+            "created_at": self.created_at,
+        }
 
 
 class TagAudit(HTMLParser):
@@ -173,6 +252,7 @@ def test_shell_has_external_asset_free_accessible_mobile_navigation():
     assert all(tab.get("type") == "button" and tab.get("aria-selected") in ("true", "false") for tab in audit.mobile_tabs)
     assert sum(tab["aria-selected"] == "true" for tab in audit.mobile_tabs) == 1
     assert "localStorage" not in "".join(path.read_text(encoding="utf-8") for path in (STATIC / "js").glob("*.js"))
+    assert "innerHTML" not in "".join(path.read_text(encoding="utf-8") for path in (STATIC / "js").glob("*.js"))
     assert "unsafe-eval" not in SECURITY_HEADERS[b"content-security-policy"].decode()
 
 
@@ -248,6 +328,111 @@ def test_playwright_shell_smoke_has_no_external_requests_or_leaks():
                 assert menu_tab.evaluate("element => document.activeElement === element"), "Focus could not return to the mobile menu tab"
                 mobile.set_viewport_size({"width": 1200, "height": 800})
                 assert all(mobile.locator(selector).is_visible() for selector in (".panel-nav", ".panel-main", ".panel-side"))
+            finally:
+                browser.close()
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+        sock.close()
+        assert not thread.is_alive()
+
+
+def test_playwright_7b_task_creation_polling_and_stale_response_protection():
+    sync_playwright = pytest.importorskip("playwright.sync_api").sync_playwright
+    service = InteractiveShellService()
+    app = create_app(service)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(128)
+    port = sock.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_config=None, lifespan="off"))
+    thread = threading.Thread(target=server.run, kwargs={"sockets": [sock]}, daemon=True)
+    thread.start()
+    origin = f"http://127.0.0.1:{port}"
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            try:
+                page = browser.new_page(viewport={"width": 1280, "height": 900})
+                page_errors = []
+                external_requests = []
+                submissions = []
+                abort_first_submission = {"value": True}
+                page.on("pageerror", lambda error: page_errors.append(str(error)))
+                page.on("request", lambda request: external_requests.append(request.url) if not request.url.startswith(origin) else None)
+
+                def capture_submission(route):
+                    request = route.request
+                    submissions.append({
+                        "key": request.headers.get("idempotency-key"),
+                        "body": request.post_data_json,
+                    })
+                    if abort_first_submission["value"]:
+                        abort_first_submission["value"] = False
+                        route.abort("failed")
+                    else:
+                        route.continue_()
+
+                page.route("**/api/v1/tasks", lambda route: capture_submission(route) if route.request.method == "POST" else route.continue_())
+                page.goto(origin, wait_until="networkidle")
+                page.locator("#task-fields").wait_for(state="visible")
+                assert page.locator("#site-label").text_content() == "site"
+                assert page.locator("#brand-label").text_content() == "brand"
+                assert page.locator(".task-row").count() == 2
+
+                page.locator("#submit-task").click()
+                assert len(submissions) == 0
+
+                page.get_by_role("button", name="較慢的任務").click()
+                page.get_by_role("button", name="目前選取任務").click()
+                page.locator("#current-task-detail").get_by_text("目前選取任務").wait_for()
+                time.sleep(0.4)
+                assert "較慢的任務" not in page.locator("#current-task-detail").text_content()
+                assert page.locator("#event-list .event-item").count() == 2
+                assert page.locator("#event-list .event-item").nth(0).text_content().startswith('<img src=x onerror="window.injected=true">')
+                assert page.locator("#event-list img").count() == 0
+                assert page.evaluate("window.injected") is None
+
+                page.locator("#topic").fill("POST 任務主題")
+                page.locator("#brief").fill("這是一段足夠長度且用於驗證冪等提交的任務需求說明。")
+                page.locator("#target-audience").fill("內容編輯")
+                draft_before_poll = page.locator("#brief").input_value()
+                page.wait_for_timeout(4200)
+                assert page.locator("#brief").input_value() == draft_before_poll
+                assert len(service.list_calls) >= 2
+                assert ("task-b", 2) in service.event_calls
+
+                page.locator("#submit-task").click()
+                page.get_by_text("結果尚未確認").wait_for()
+                page.locator("#resubmit-task").click()
+                page.get_by_text("需求內容已鎖定").wait_for()
+                assert submissions[0]["key"] == submissions[1]["key"]
+                assert submissions[0]["body"] == submissions[1]["body"]
+                post_body = submissions[1]["body"]
+                assert post_body["content_type"] == "POST"
+                assert post_body["target_audience"] == "內容編輯"
+                assert post_body["page_purpose"] is None
+                assert post_body["site_id"] == "site" and post_body["brand_profile_id"] == "brand"
+
+                page.locator("#new-task-button").click()
+                page.locator("#content-type").select_option("PAGE")
+                page.locator("#topic").fill("PAGE 任務主題")
+                page.locator("#brief").fill("這是一段足夠長度且用於驗證頁面任務的需求說明。")
+                page.locator("#page-purpose").select_option("SERVICE")
+                page.locator("#submit-task").dblclick()
+                page.get_by_text("需求內容已鎖定").wait_for()
+                assert len(service.create_calls) == 2
+                page_body = service.create_calls[-1][1]
+                assert page_body["content_type"] == "PAGE"
+                assert page_body["target_audience"] is None
+                assert page_body["page_purpose"] == "SERVICE"
+                assert submissions[-1]["key"] != submissions[0]["key"]
+
+                page.locator("#load-more").click()
+                page.get_by_role("button", name="載入更多任務").wait_for()
+                assert (20, "opaque+/=cursor") in service.list_calls
+                assert not page_errors
+                assert not external_requests
             finally:
                 browser.close()
     finally:

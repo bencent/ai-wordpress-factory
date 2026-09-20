@@ -57,6 +57,55 @@
           <span class="date-label" id="timeline-date">載入中</span>
         </div>
 
+        <section class="task-composer" aria-labelledby="task-form-title">
+          <div class="subsection-heading">
+            <div>
+              <p class="eyebrow">建立工作</p>
+              <h3 id="task-form-title">建立任務</h3>
+            </div>
+            <button id="new-task-button" class="text-button" type="button" hidden>建立另一筆</button>
+          </div>
+          <form id="task-form" novalidate>
+            <fieldset id="task-fields" disabled>
+              <div class="form-grid">
+                <label>內容類型
+                  <select id="content-type" name="content_type" required>
+                    <option value="POST">文章</option>
+                    <option value="PAGE">頁面</option>
+                  </select>
+                </label>
+                <label>主題
+                  <input id="topic" name="topic" type="text" minlength="3" maxlength="150" required>
+                </label>
+                <label class="form-wide">需求說明
+                  <textarea id="brief" name="brief" minlength="20" maxlength="5000" rows="5" required></textarea>
+                </label>
+                <label id="audience-field" class="form-wide">目標讀者
+                  <input id="target-audience" name="target_audience" type="text" required>
+                </label>
+                <label id="purpose-field" class="form-wide" hidden>頁面用途
+                  <select id="page-purpose" name="page_purpose">
+                    <option value="">請選擇</option>
+                  </select>
+                </label>
+              </div>
+              <div class="scope-summary" aria-label="工作區範圍">
+                <span>Site <strong id="site-label">等待載入</strong></span>
+                <span>Brand <strong id="brand-label">等待載入</strong></span>
+              </div>
+              <div class="form-actions">
+                <button id="submit-task" class="primary-button" type="submit">建立任務</button>
+              </div>
+            </fieldset>
+          </form>
+          <div id="submission-message" class="form-message" role="status" aria-live="polite"></div>
+          <div id="uncertain-actions" class="form-actions" hidden>
+            <button id="resubmit-task" class="primary-button" type="button">使用相同提交識別重新送出</button>
+            <button id="cancel-submission" class="text-button" type="button">取消並重新建立</button>
+          </div>
+          <dl id="request-summary" class="request-summary" hidden></dl>
+        </section>
+
         <section class="timeline-region" aria-labelledby="timeline-title">
           <div id="timeline-loading" class="loading-state" role="status" aria-live="polite">
             <span class="skeleton skeleton-title" aria-hidden="true"></span>
@@ -69,6 +118,9 @@
             <p class="empty-copy">任務建立後，這裡會顯示可公開的狀態更新。</p>
           </div>
           <div id="timeline-content" class="timeline-content" hidden></div>
+          <div class="list-actions">
+            <button id="load-more" class="text-button" type="button" hidden>載入更多</button>
+          </div>
         </section>
 
         <section class="current-task" aria-labelledby="current-task-title">
@@ -78,6 +130,14 @@
           </div>
           <div id="current-task-empty" class="quiet-state">尚未選擇任務</div>
           <div id="current-task-detail" class="current-task-detail" hidden></div>
+          <section id="event-region" class="event-region" aria-labelledby="event-title" hidden>
+            <div class="subsection-heading">
+              <h3 id="event-title">事件紀錄</h3>
+              <span id="event-sync" class="muted">等待同步</span>
+            </div>
+            <ol id="event-list" class="event-list"></ol>
+            <div id="event-empty" class="quiet-state">目前沒有公開事件</div>
+          </section>
         </section>
       </main>
 
