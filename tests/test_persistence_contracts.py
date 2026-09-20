@@ -7,10 +7,11 @@ import pytest
 
 from domain.providers import DEFAULT_WORKSPACE_ID
 from domain.contracts import Task, TaskRun, TaskEvent, ContentVersion, ContentType, Status
-from persistence.codec import CodecError, encode_record, decode_record, decode_snapshot
+from persistence.codec import CodecError, encode_record, decode_record, decode_snapshot, encode_snapshot
 from persistence.connection import ConnectionFactory, PersistenceError, ConstraintViolation, DatabaseBusy
 from persistence.migration_runner import migrate
 from persistence.repository import SQLiteStore
+from domain.ai_runtime import RuntimeOnly, ProviderBundle
 
 
 @pytest.fixture
@@ -55,6 +56,114 @@ def test_round_trip_and_reopen(store, content_type):
         assert repo.events('a') == [items[2]]
         assert repo.events('a', after_sequence=1) == []
         assert repo.get(Task, 'missing') is None
+
+
+def test_workflow_state_image_statuses_round_trip(store):
+    for status in ('READY', 'FAILED', 'PENDING'):
+        task = Task(task_id='t-'+status, workspace_id=DEFAULT_WORKSPACE_ID, submission_key='key-'+status,
+                     site_id='site-'+status, content_type=ContentType.POST, topic='主題',
+                     brief='需求', brand_profile_id='brand',
+                     created_at='2026-09-17T00:00:00Z', updated_at='2026-09-17T00:00:00Z',
+                     request_snapshot={}, approval_policy_snapshot={'mode': 'REQUIRE_HUMAN_REVIEW'})
+        run = TaskRun(run_id='rt-'+status, task_id='t-'+status, attempt=1,
+                       created_at='2026-09-17T00:00:00Z', updated_at='2026-09-17T00:00:00Z',
+                       workflow_state={'draft': None, 'image': {'status': status, 'artifact_id': 'img-'+status},
+                                       'items': [1, True, None], 'summary': '繁體中文測試'})
+        with store.transaction() as repo:
+            repo.add(task)
+            repo.add(run)
+        reopened = SQLiteStore(ConnectionFactory(store.factory.path))
+        with reopened.reader() as repo:
+            saved = repo.get(TaskRun, 'rt-'+status)
+            assert saved.workflow_state['image']['status'] == status
+            assert saved.workflow_state['items'] == [1, True, None]
+            assert saved.workflow_state['summary'] == '繁體中文測試'
+            assert decode_record(TaskRun, encode_record(saved)) == saved
+
+
+def test_workflow_state_schema_version_preserved(store):
+    task = Task(task_id='t-sv', workspace_id=DEFAULT_WORKSPACE_ID, submission_key='key-sv',
+                 site_id='site-sv', content_type=ContentType.POST, topic='主題',
+                 brief='需求', brand_profile_id='brand',
+                 created_at='2026-09-17T00:00:00Z', updated_at='2026-09-17T00:00:00Z',
+                 request_snapshot={}, approval_policy_snapshot={'mode': 'REQUIRE_HUMAN_REVIEW'})
+    run = TaskRun(run_id='rt-sv', task_id='t-sv', attempt=1,
+                   created_at='2026-09-17T00:00:00Z', updated_at='2026-09-17T00:00:00Z',
+                   workflow_state={'draft': None, 'image': {'status': 'READY'}, 'items': [1]})
+    with store.transaction() as repo:
+        repo.add(task)
+        repo.add(run)
+    encoded = encode_snapshot(run.workflow_state)
+    envelope = json.loads(encoded)
+    assert envelope['schema_version'] == 1
+    assert 'data' in envelope
+
+
+def test_workflow_state_unsupported_type_fail_closed(store):
+    runtime_obj = RuntimeOnly()
+    with pytest.raises(CodecError):
+        encode_snapshot({'provider': runtime_obj})
+    with pytest.raises(CodecError):
+        encode_snapshot({'client': object()})
+
+
+def test_workflow_state_no_secrets_in_serialized(store):
+    from domain.ai_runtime import ProviderBundle, TextProvider
+    from unittest.mock import Mock
+    provider = Mock(spec=TextProvider)
+    provider.complete = Mock(return_value='result')
+    bundle = ProviderBundle(provider)
+    task = Task(task_id='t-secret', workspace_id=DEFAULT_WORKSPACE_ID, submission_key='key-secret',
+                 site_id='site-secret', content_type=ContentType.POST, topic='主題',
+                 brief='需求', brand_profile_id='brand',
+                 created_at='2026-09-17T00:00:00Z', updated_at='2026-09-17T00:00:00Z',
+                 request_snapshot={}, approval_policy_snapshot={'mode': 'REQUIRE_HUMAN_REVIEW'})
+    run = TaskRun(run_id='rt-secret', task_id='t-secret', attempt=1,
+                   created_at='2026-09-17T00:00:00Z', updated_at='2026-09-17T00:00:00Z',
+                   workflow_state={'draft': None, 'image': {'status': 'READY'}, 'items': [1]})
+    serialized = encode_snapshot(run.workflow_state)
+    assert 'provider' not in serialized
+    assert 'client' not in serialized
+    assert 'api_key' not in serialized
+    assert 'password' not in serialized
+    assert 'Authorization' not in serialized
+
+
+def test_workflow_state_chinese_and_complex_types_round_trip(store):
+    task = Task(task_id='t-zh', workspace_id=DEFAULT_WORKSPACE_ID, submission_key='key-zh',
+                 site_id='site-zh', content_type=ContentType.POST, topic='繁體中文主題',
+                 brief='內容需求', brand_profile_id='brand',
+                 created_at='2026-09-17T00:00:00Z', updated_at='2026-09-17T00:00:00Z',
+                 request_snapshot={}, approval_policy_snapshot={'mode': 'REQUIRE_HUMAN_REVIEW'})
+    run = TaskRun(run_id='rt-zh', task_id='t-zh', attempt=1,
+                   created_at='2026-09-17T00:00:00Z', updated_at='2026-09-17T00:00:00Z',
+                   workflow_state={'draft': '繁體中文內容', 'image': {'status': 'READY', 'metadata': {'描述': '測試'}},
+                                   'items': [1, True, None, {'key': '值'}], 'nested': {'list': [1, 2, {'deep': '中文'}]}})
+    with store.transaction() as repo:
+        repo.add(task)
+        repo.add(run)
+    reopened = SQLiteStore(ConnectionFactory(store.factory.path))
+    with reopened.reader() as repo:
+        saved = repo.get(TaskRun, 'rt-zh')
+        assert saved.workflow_state['draft'] == '繁體中文內容'
+        assert saved.workflow_state['image']['metadata']['描述'] == '測試'
+        assert saved.workflow_state['nested']['list'][2]['deep'] == '中文'
+        assert decode_record(TaskRun, encode_record(saved)) == saved
+
+
+def test_workflow_state_unknown_schema_version_fail_closed(store):
+    with pytest.raises(CodecError):
+        decode_snapshot('{"schema_version":99,"data":{}}')
+    with pytest.raises(CodecError):
+        decode_snapshot('{"schema_version":0,"data":{}}')
+    with pytest.raises(CodecError):
+        decode_snapshot('{"schema_version":"1","data":{}}')
+
+
+def test_workflow_state_corrupt_json_fail_closed(store):
+    for raw in ['{', '{"schema_version":1,"data":NaN}', '{"schema_version":1,"data":{}}extra']:
+        with pytest.raises(CodecError):
+            decode_snapshot(raw)
 
 
 def test_wal_fk_timeout_and_idempotent_migration(store):
