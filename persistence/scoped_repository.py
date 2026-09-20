@@ -43,6 +43,13 @@ class SQLiteWorkspaceRepository:
             (self._workspace_id,submission_key)).fetchone()
         return self._internal._decode(Task,row)
 
+    def find_retry_request(self, idempotency_key):
+        row = self._internal._conn.execute(
+            "SELECT task_id,resulting_run_id FROM task_retry_requests "
+            "WHERE workspace_id=? AND idempotency_key=?",
+            (self._workspace_id,idempotency_key)).fetchone()
+        return None if row is None else (row['task_id'],row['resulting_run_id'])
+
     def recent_tasks(self, *, limit, before=None):
         if type(limit) is not int or not 1 <= limit <= 1001:
             raise ValueError('Invalid task limit')
@@ -106,7 +113,7 @@ class SQLiteWorkspaceRepository:
             (self._workspace_id,task_id,after_sequence,limit))
         return [self._internal._decode(TaskEvent,row) for row in rows]
 
-    def retry_task(self, task_id, expected_run_id, expected_status, now):
+    def retry_task(self, task_id, expected_run_id, expected_status, idempotency_key, now):
         from uuid import uuid4
         from domain.contracts import Status
         self._internal._write()
@@ -135,6 +142,10 @@ class SQLiteWorkspaceRepository:
         self.add(TaskEvent(event_id=str(uuid4()),event_key='retry:'+run.run_id,task_id=task_id,
             run_id=run.run_id,attempt=attempt,sequence_number=sequence,type='TASK_RETRY_REQUESTED',
             actor='system',status=Status.QUEUED,summary='任務已排入重試佇列',created_at=now))
+        self._internal._conn.execute(
+            'INSERT INTO task_retry_requests '
+            '(workspace_id,task_id,idempotency_key,resulting_run_id,created_at) VALUES (?,?,?,?,?)',
+            (self._workspace_id,task_id,idempotency_key,run.run_id,now))
         return self.get_task(task_id)
 
     def health_observation(self):

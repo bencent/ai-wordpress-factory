@@ -53,7 +53,7 @@ def seed(store):
 def test_fresh_migration_and_idempotent_seed(store):
     migrate(store.factory)
     with store.factory.connection() as conn:
-        assert [r[0] for r in conn.execute('SELECT version FROM schema_migrations ORDER BY version')]==[1,2]
+        assert [r[0] for r in conn.execute('SELECT version FROM schema_migrations ORDER BY version')]==[1,2,3]
         rows=conn.execute("SELECT * FROM workspaces WHERE workspace_key='default'").fetchall()
         assert len(rows)==1 and UUID(rows[0]['workspace_id']).version==4
         assert rows[0]['workspace_id']==DEFAULT_WORKSPACE_ID
@@ -89,6 +89,7 @@ def test_upgrade_preserves_all_records_and_backfills(tmp_path):
         for table in ('tasks','task_runs','task_events','content_versions'):
             before[table]=[dict(r) for r in conn.execute('SELECT * FROM '+table)]
     shutil.copyfile(MIGRATIONS/'0002_workspace_provider.sql',directory/'0002_workspace_provider.sql')
+    shutil.copyfile(MIGRATIONS/'0003_retry_idempotency.sql',directory/'0003_retry_idempotency.sql')
     migrate(factory,directory)
     migrate(factory,directory)
     with factory.connection() as conn:

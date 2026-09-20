@@ -174,10 +174,11 @@ def test_wal_fk_timeout_and_idempotent_migration(store):
         assert conn.execute('PRAGMA foreign_keys').fetchone()[0] == 1
         assert conn.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'
         assert conn.execute('PRAGMA busy_timeout').fetchone()[0] == 50
-        assert conn.execute('SELECT count(*) FROM schema_migrations').fetchone()[0] == 2
+        assert [r[0] for r in conn.execute(
+            'SELECT version FROM schema_migrations ORDER BY version')] == [1, 2, 3]
         assert {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")} == {
             'schema_migrations', 'tasks', 'task_runs', 'task_events', 'content_versions',
-            'workspaces', 'ai_provider_connections', 'ai_invocations'}
+            'workspaces', 'ai_provider_connections', 'ai_invocations', 'task_retry_requests'}
 
 
 def test_transaction_rollback_all_records(store):
@@ -407,4 +408,5 @@ def test_concurrent_migrations_share_one_history(store):
         for future in futures:
             future.result(timeout=5)
     with store.factory.connection() as conn:
-        assert conn.execute('SELECT count(*) FROM schema_migrations').fetchone()[0] == 2
+        assert [r[0] for r in conn.execute(
+            'SELECT version FROM schema_migrations ORDER BY version')] == [1, 2, 3]

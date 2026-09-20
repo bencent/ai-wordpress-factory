@@ -92,7 +92,9 @@ def test_get_cross_workspace_and_projection(api):
     assert response.json()['current_run']['attempt']==1
     assert not {'workspace_id','request_snapshot','client_brand_snapshot','workflow_state','credential_reference','owner_id'} & set(response.json())
     for suffix,method in (('',client.get),('/events',client.get),('/retry',client.post)):
-        x=method('/api/v1/tasks/'+other.task_id+suffix);y=method('/api/v1/tasks/'+str(uuid4())+suffix)
+        kwargs={'json':{},'headers':{'Idempotency-Key':'retry-scope-check'}} if suffix=='/retry' else {}
+        x=method('/api/v1/tasks/'+other.task_id+suffix,**kwargs)
+        y=method('/api/v1/tasks/'+str(uuid4())+suffix,**kwargs)
         assert x.status_code==y.status_code==404
         assert {k:v for k,v in x.json()['error'].items() if k!='request_id'}=={k:v for k,v in y.json()['error'].items() if k!='request_id'}
 
@@ -132,9 +134,9 @@ def test_atomic_retry_preserves_history(api,lost):
         old_run=repo.get(TaskRun,lease.run_id);old_events=repo.events(task.task_id)
     def retry():
         with TestClient(create_app(service),raise_server_exceptions=False) as other:
-            return other.post('/api/v1/tasks/'+task.task_id+'/retry')
+            return other.post('/api/v1/tasks/'+task.task_id+'/retry',json={},headers={'Idempotency-Key':'retry-key'})
     with ThreadPoolExecutor(max_workers=2) as pool: responses=list(pool.map(lambda _:retry(),range(2)))
-    assert sorted(x.status_code for x in responses)==[200,409]
+    assert [x.status_code for x in responses]==[200,200]
     with store.reader() as repo:
         current=repo.get(Task,task.task_id);new=repo.get(TaskRun,current.current_run_id)
         assert new.attempt==2 and new.status==Status.QUEUED and new.workflow_state is None
@@ -143,12 +145,13 @@ def test_atomic_retry_preserves_history(api,lost):
         assert repo.invocations(lease.run_id)==[invocation]
         assert current.request_snapshot==task.request_snapshot
         assert repo._conn.execute('SELECT count(*) FROM task_runs WHERE task_id=?',(task.task_id,)).fetchone()[0]==2
-    assert client.post('/api/v1/tasks/'+task.task_id+'/retry').status_code==409
+    assert client.post('/api/v1/tasks/'+task.task_id+'/retry',json={},headers={'Idempotency-Key':'other-key'}).status_code==409
 
 def test_retry_conflict_and_body(api):
     client=api[0];task=post(client).json()
-    assert client.post('/api/v1/tasks/'+task['task_id']+'/retry').status_code==409
-    assert client.post('/api/v1/tasks/'+task['task_id']+'/retry',json={'workspace_id':'bad'}).status_code==400
+    url='/api/v1/tasks/'+task['task_id']+'/retry'
+    assert client.post(url,json={},headers={'Idempotency-Key':'retry'}).status_code==409
+    assert client.post(url,json={'workspace_id':'bad'},headers={'Idempotency-Key':'retry'}).status_code==400
 
 def test_health_online_offline_unknown_and_database(api):
     client,service,store,a,b,pa,pb=api

@@ -9,7 +9,7 @@ from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException
 from fastapi.concurrency import run_in_threadpool
 from domain.submission import ValidationError,IdempotencyConflict,ProfileError,TaskNotFound
-from service.task_http import RetryConflict
+from service.task_http import RetryConflict,RetryIdempotencyConflict
 from persistence.connection import PersistenceError
 from service.http_bootstrap import build_http_service
 
@@ -81,6 +81,7 @@ def create_app(service=None):
         IdempotencyConflict:(409,'IDEMPOTENCY_CONFLICT','Submission key conflicts with an existing request.'),
         ProfileError:(400,'VALIDATION_ERROR','Requested resources are unavailable.'),
         TaskNotFound:(404,'TASK_NOT_FOUND','Task not found.'),
+        RetryIdempotencyConflict:(409,'IDEMPOTENCY_CONFLICT','Retry key conflicts with an existing request.'),
         RetryConflict:(409,'RETRY_CONFLICT','Task cannot be retried in its current state.'),
         PersistenceError:(503,'SERVICE_UNAVAILABLE','Service is temporarily unavailable.')}
     async def domain_error(request,exc):
@@ -132,9 +133,10 @@ def create_app(service=None):
     @app.post('/api/v1/tasks/{task_id}/retry')
     async def retry(request:Request,task_id:str):
         boundary(request)
-        raw=await request.body()
-        if raw and await body(request)!={}: raise ValidationError('body')
-        return await run_in_threadpool(application.retry,task_id)
+        keys=request.headers.getlist('idempotency-key')
+        if len(keys)!=1: raise ValidationError('idempotency_key')
+        if await body(request)!={}: raise ValidationError('body')
+        return await run_in_threadpool(application.retry,task_id,keys[0])
     @app.get('/api/v1/system/status')
     async def status(request:Request):
         boundary(request)

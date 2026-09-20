@@ -15,6 +15,7 @@ UI_PAGE_PURPOSES=['ABOUT','SERVICE','EVENT','OTHER']
 UI_LIMITS={'topic_min':3,'topic_max':150,'brief_min':20,'brief_max':5000}
 
 class RetryConflict(ValueError): pass
+class RetryIdempotencyConflict(ValueError): pass
 
 def cursor_encode(value):
     return base64.urlsafe_b64encode(json.dumps({'v':1,'position':value},separators=(',',':')).encode()).decode().rstrip('=') if value else None
@@ -113,12 +114,21 @@ class TaskHTTPService:
             events=repo.public_events(task_id,after_sequence)
         return {'events':[event_view(e) for e in events],
             'last_sequence':events[-1].sequence_number if events else after_sequence}
-    def retry(self,task_id):
+    def retry(self,task_id,idempotency_key):
+        if (type(idempotency_key) is not str or not 1 <= len(idempotency_key) <= 200
+                or not idempotency_key.strip()):
+            raise ValidationError('idempotency_key')
         with self.store.workspace_transaction(self.context().workspace_id) as repo:
+            existing=repo.find_retry_request(idempotency_key)
+            if existing is not None:
+                if existing[0]!=task_id: raise RetryIdempotencyConflict()
+                task=repo.get_task(task_id)
+                if task is None: raise TaskNotFound()
+                return task_view(task)
             task=repo.get_task(task_id)
             if task is None: raise TaskNotFound()
             if task.status not in (Status.FAILED,Status.WORKER_LOST): raise RetryConflict()
-            updated=repo.retry_task(task_id,task.current_run_id,task.status,self.clock().isoformat())
+            updated=repo.retry_task(task_id,task.current_run_id,task.status,idempotency_key,self.clock().isoformat())
             if updated is None: raise RetryConflict()
             return task_view(updated)
     def status(self):
