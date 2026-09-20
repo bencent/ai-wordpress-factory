@@ -1,8 +1,10 @@
 """HTTP transport only. Execution and persistence stay in application services."""
-import json,logging
+import logging
+from pathlib import Path
 from uuid import uuid4
 from fastapi import FastAPI,Request,Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse,JSONResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException
 from fastapi.concurrency import run_in_threadpool
@@ -10,6 +12,16 @@ from domain.submission import ValidationError,IdempotencyConflict,ProfileError,T
 from service.task_http import RetryConflict
 from persistence.connection import PersistenceError
 from service.http_bootstrap import build_http_service
+
+BASE_DIR=Path(__file__).parents[1]
+STATIC_DIR=BASE_DIR/'static'
+INDEX_PATH=STATIC_DIR/'index.html'
+SECURITY_HEADERS={
+    b'content-security-policy':b"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+    b'x-content-type-options':b'nosniff',
+    b'referrer-policy':b'strict-origin-when-cross-origin',
+    b'x-frame-options':b'DENY',
+}
 
 def error(request,status,code,message):
     return JSONResponse({'error':{'code':code,'message':message,'request_id':request.state.request_id}},status_code=status)
@@ -35,8 +47,6 @@ class RequestBoundary:
             if sent: return await receive()
             sent=True
             return {'type':'http.request','body':b''.join(chunks),'more_body':False}
-        # Consume unexpected errors before ServerErrorMiddleware can rethrow to the
-        # ASGI server (whose traceback logger is outside our redaction boundary).
         started=False
         async def tracked_send(message):
             nonlocal started
@@ -50,10 +60,22 @@ class RequestBoundary:
                 response=error(Request(scope),500,'INTERNAL_ERROR','An unexpected error occurred.')
                 await response(scope,receive,send)
 
+class SecurityHeadersMiddleware:
+    def __init__(self,app): self.app=app
+    async def __call__(self,scope,receive,send):
+        if scope['type']!='http': return await self.app(scope,receive,send)
+        async def tracked_send(message):
+            if message['type']=='http.response.start':
+                headers=[(key,value) for key,value in message.get('headers',[]) if key.lower() not in SECURITY_HEADERS]
+                message['headers']=headers+[(key,value) for key,value in SECURITY_HEADERS.items()]
+            await send(message)
+        await self.app(scope,receive,tracked_send)
+
 
 def create_app(service=None):
     app=FastAPI(debug=False,docs_url=None,redoc_url=None,openapi_url=None)
     app.add_middleware(RequestBoundary)
+    app.add_middleware(SecurityHeadersMiddleware)
     application=service if service is not None else build_http_service()
     mappings={ValidationError:(400,'VALIDATION_ERROR','Invalid request.'),
         IdempotencyConflict:(409,'IDEMPOTENCY_CONFLICT','Submission key conflicts with an existing request.'),
@@ -81,6 +103,11 @@ def create_app(service=None):
         if request.headers.get('content-type','').split(';')[0].lower()!='application/json': raise ValidationError('content_type')
         try: return await request.json()
         except (ValueError,UnicodeError): raise ValidationError('body') from None
+    app.mount("/static", StaticFiles(directory=STATIC_DIR,check_dir=False), name="static")
+    @app.get("/")
+    async def index(request:Request):
+        if not INDEX_PATH.is_file(): return error(request,503,'SERVICE_UNAVAILABLE','Static UI is unavailable.')
+        return FileResponse(INDEX_PATH,media_type='text/html')
     @app.post('/api/v1/tasks')
     async def create(request:Request):
         boundary(request)
@@ -112,6 +139,16 @@ def create_app(service=None):
     async def status(request:Request):
         boundary(request)
         return await run_in_threadpool(application.status)
+
+    @app.get('/api/v1/ui/bootstrap')
+    async def bootstrap(request:Request):
+        boundary(request)
+        try:
+            result = await run_in_threadpool(application.bootstrap)
+            from fastapi.encoders import jsonable_encoder
+            return JSONResponse(jsonable_encoder(result))
+        except ProfileError:
+            return error(request,503,'SERVICE_UNAVAILABLE','Requested resources are unavailable.')
     return app
 
 app=create_app()

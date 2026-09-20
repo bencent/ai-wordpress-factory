@@ -174,7 +174,7 @@ def test_error_envelope_unexpected_and_routes(api,caplog):
     assert err['code']=='INTERNAL_ERROR'
     assert 'raw-exception' not in response.text+caplog.text and 'credential-canary' not in response.text+caplog.text
     routes={route.path for route in create_app(service).routes}
-    assert routes=={'/api/v1/tasks','/api/v1/tasks/{task_id}','/api/v1/tasks/{task_id}/events','/api/v1/tasks/{task_id}/retry','/api/v1/system/status'}
+    assert routes=={'/','/static','/api/v1/tasks','/api/v1/tasks/{task_id}','/api/v1/tasks/{task_id}/events','/api/v1/tasks/{task_id}/retry','/api/v1/system/status','/api/v1/ui/bootstrap'}
     assert 'access-control-allow-origin' not in client.get('/api/v1/system/status',headers={'Origin':'https://elsewhere.example'}).headers
 
 def test_transport_uses_only_application_service():

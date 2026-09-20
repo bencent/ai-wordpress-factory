@@ -1,13 +1,18 @@
 """Workspace-scoped application facade and public projections; no network execution."""
-import base64,json
+import base64,json,os
 from datetime import datetime,timezone
+from pathlib import Path
 from uuid import UUID
-from domain.submission import ValidationError,TaskNotFound
+from domain.submission import ValidationError,TaskNotFound,SubmissionProfile,ProfileError
 from domain.contracts import Status
 from domain.failures import SAFE_RUN_ERROR_CODES
 from service.query import ScopedQueryService
 from service.submission import ScopedTaskSubmissionService
 from service.workspace_bootstrap import default_workspace_context
+
+UI_CONTENT_TYPES=['POST','PAGE']
+UI_PAGE_PURPOSES=['ABOUT','SERVICE','EVENT','OTHER']
+UI_LIMITS={'topic_min':3,'topic_max':150,'brief_min':20,'brief_max':5000}
 
 class RetryConflict(ValueError): pass
 
@@ -63,6 +68,31 @@ class TaskHTTPService:
     def __init__(self,store,resolver,*,context_provider=default_workspace_context,clock=None):
         self.store,self.resolver,self.context_provider=store,resolver,context_provider
         self.clock=clock or (lambda:datetime.now(timezone.utc))
+
+    def bootstrap(self):
+        context=self.context_provider(self.store)
+        path=os.environ.get('AIWF_PROFILES_FILE')
+        if not path: raise ProfileError()
+        try:
+            records=json.loads(Path(path).read_text(encoding='utf-8'))
+        except (OSError,UnicodeError,json.JSONDecodeError,TypeError): raise ProfileError()
+        if type(records) is not list: raise ProfileError()
+        for row in records:
+            if type(row) is not dict or row.get('workspace_id')!=context.workspace_id: continue
+            site_id=row.get('site_id');brand_profile_id=row.get('brand_profile_id')
+            if type(site_id) is not str or not site_id or type(brand_profile_id) is not str or not brand_profile_id: continue
+            try:
+                profile=self.resolver(context,site_id,brand_profile_id)
+            except (ProfileError,ValueError,TypeError): continue
+            if type(profile) is not SubmissionProfile or profile.workspace_id!=context.workspace_id: continue
+            if profile.site_id!=site_id or profile.brand_profile_id!=brand_profile_id: continue
+            return {
+                'defaults':{'site_id':site_id,'brand_profile_id':brand_profile_id},
+                'content_types':list(UI_CONTENT_TYPES),
+                'page_purposes':list(UI_PAGE_PURPOSES),
+                'limits':dict(UI_LIMITS),
+            }
+        raise ProfileError()
     def context(self): return self.context_provider(self.store)
     def create(self,key,body):
         result=ScopedTaskSubmissionService(self.store,self.context(),self.resolver).submit(key,body)

@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>AI WordPress Factory</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+  <div class="app-shell" data-active-panel="tasks">
+    <header class="topbar">
+      <div class="brand-block">
+        <span class="brand-mark" aria-hidden="true">AW</span>
+        <div class="brand-copy">
+          <p class="brand-overline">內容生產工作台</p>
+          <h1>AI WordPress Factory</h1>
+        </div>
+      </div>
+      <div class="connection" aria-label="系統連線">
+        <span class="connection-dot" aria-hidden="true"></span>
+        <span id="connection-label">載入中</span>
+      </div>
+    </header>
+
+    <nav class="mobile-nav" aria-label="行動版主要選單">
+      <div class="mobile-tabs" role="tablist" aria-label="主要面板">
+        <button class="mobile-tab" type="button" role="tab" aria-selected="true" data-panel="tasks">任務</button>
+        <button class="mobile-tab" type="button" role="tab" aria-selected="false" data-panel="menu">主選單</button>
+        <button class="mobile-tab" type="button" role="tab" aria-selected="false" data-panel="messages">訊息</button>
+      </div>
+    </nav>
+
+    <div class="layout">
+      <aside class="panel panel-nav" aria-labelledby="nav-title">
+        <h2 id="nav-title" class="visually-hidden">主要選單</h2>
+        <div class="nav-section">
+          <p class="section-label">工作區</p>
+          <button class="nav-action" type="button" data-panel="tasks">建立任務</button>
+          <nav class="nav-links" aria-label="任務選單">
+            <button class="nav-link" type="button" data-panel="tasks" aria-current="page">任務</button>
+            <button class="nav-link" type="button" data-panel="messages">系統狀態</button>
+          </nav>
+        </div>
+        <div class="nav-foot">
+          <p>本機工作台</p>
+          <p class="muted">尚未連線</p>
+        </div>
+      </aside>
+
+      <main class="panel panel-main" aria-labelledby="timeline-title">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">工作列</p>
+            <h2 id="timeline-title">任務時間軸</h2>
+          </div>
+          <span class="date-label" id="timeline-date">載入中</span>
+        </div>
+
+        <section class="timeline-region" aria-labelledby="timeline-title">
+          <div id="timeline-loading" class="loading-state" role="status" aria-live="polite">
+            <span class="skeleton skeleton-title" aria-hidden="true"></span>
+            <span class="skeleton skeleton-line" aria-hidden="true"></span>
+            <span class="skeleton skeleton-line skeleton-line-short" aria-hidden="true"></span>
+            <span class="visually-hidden">正在載入任務時間軸</span>
+          </div>
+          <div id="timeline-empty" class="empty-state" hidden>
+            <p class="empty-title">目前沒有任務資料</p>
+            <p class="empty-copy">任務建立後，這裡會顯示可公開的狀態更新。</p>
+          </div>
+          <div id="timeline-content" class="timeline-content" hidden></div>
+        </section>
+
+        <section class="current-task" aria-labelledby="current-task-title">
+          <div class="subsection-heading">
+            <h3 id="current-task-title">目前任務</h3>
+            <span id="current-task-status" class="status-chip">等待載入</span>
+          </div>
+          <div id="current-task-empty" class="quiet-state">尚未選擇任務</div>
+          <div id="current-task-detail" class="current-task-detail" hidden></div>
+        </section>
+      </main>
+
+      <aside class="panel panel-side" aria-labelledby="side-title">
+        <h2 id="side-title" class="visually-hidden">待處理與系統</h2>
+        <section class="side-section" aria-labelledby="pending-title">
+          <div class="subsection-heading">
+            <h3 id="pending-title">待處理</h3>
+            <span class="count-label">0</span>
+          </div>
+          <div id="pending-empty" class="quiet-state">目前沒有待處理事項</div>
+          <div id="pending-list" hidden></div>
+        </section>
+
+        <section class="side-section" aria-labelledby="message-title">
+          <div class="subsection-heading">
+            <h3 id="message-title">系統訊息</h3>
+          </div>
+          <div id="system-message" class="message-state" role="status" aria-live="polite">正在載入</div>
+        </section>
+
+        <section class="side-section" aria-labelledby="health-title">
+          <div class="subsection-heading">
+            <h3 id="health-title">Worker / API</h3>
+          </div>
+          <dl class="health-grid">
+            <div><dt>API</dt><dd id="health-api">等待載入</dd></div>
+            <div><dt>Database</dt><dd id="health-database">等待載入</dd></div>
+            <div><dt>Worker</dt><dd id="health-worker">等待載入</dd></div>
+          </dl>
+        </section>
+      </aside>
+    </div>
+  </div>
+  <script type="module" src="/static/js/app.js"></script>
+</body>
+</html>
