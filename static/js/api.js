@@ -92,7 +92,11 @@ export function createApiClient({fetchImpl = globalThis.fetch?.bind(globalThis),
     },
     getTask: (taskId) => request(`/api/v1/tasks/${encodeURIComponent(requireId(taskId, 'task_id'))}`),
     getTaskEvents: (taskId, afterSequence = 0) => request(`/api/v1/tasks/${encodeURIComponent(requireId(taskId, 'task_id'))}/events?after_sequence=${encodeURIComponent(String(afterSequence))}`),
-    retryTask: (taskId) => request(`/api/v1/tasks/${encodeURIComponent(requireId(taskId, 'task_id'))}/retry`, {method: 'POST', body: '{}'}),
+    retryTask: (taskId, idempotencyKey) => request(`/api/v1/tasks/${encodeURIComponent(requireId(taskId, 'task_id'))}/retry`, {
+      method: 'POST',
+      headers: {'Idempotency-Key': requireId(idempotencyKey, 'idempotency_key')},
+      body: '{}',
+    }),
     getStatus: () => request('/api/v1/system/status'),
   });
 }

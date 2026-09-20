@@ -17,7 +17,7 @@
           <h1>AI WordPress Factory</h1>
         </div>
       </div>
-      <div class="connection" aria-label="系統連線">
+      <div class="connection" aria-label="系統連線" role="status" aria-live="polite" id="connection-status">
         <span class="connection-dot" aria-hidden="true"></span>
         <span id="connection-label">載入中</span>
       </div>
@@ -130,6 +130,10 @@
           </div>
           <div id="current-task-empty" class="quiet-state">尚未選擇任務</div>
           <div id="current-task-detail" class="current-task-detail" hidden></div>
+          <div id="retry-actions" class="form-actions" hidden>
+            <button id="retry-task" class="primary-button" type="button">以相同需求重試</button>
+            <button id="retry-cancel" class="text-button" type="button" hidden>取消重試</button>
+          </div>
           <section id="event-region" class="event-region" aria-labelledby="event-title" hidden>
             <div class="subsection-heading">
               <h3 id="event-title">事件紀錄</h3>

@@ -107,7 +107,9 @@ function renderTasks(next) {
     const main = element('span', 'task-row-main');
     main.append(element('strong', '', task.topic || '未命名任務'), element('span', 'muted', task.content_type || '—'));
     const meta = element('span', 'task-row-meta');
-    meta.append(element('span', 'status-chip', task.status || 'UNKNOWN'), element('time', '', formatTime(task.created_at)));
+    const chip = element('span', 'status-chip', task.status || 'UNKNOWN');
+    chip.dataset.status = task.status || 'UNKNOWN';
+    meta.append(chip, element('time', '', formatTime(task.created_at)));
     button.append(main, meta);
     button.addEventListener('click', () => selectTask(task.task_id));
     return button;
@@ -122,10 +124,22 @@ function appendDetailRow(container, label, value) {
 
 function renderDetail(next) {
   const detail = next.taskDetail;
+  const status = detail?.status ?? null;
   elements['current-task-empty'].hidden = Boolean(detail);
   elements['current-task-detail'].hidden = !detail;
   elements['event-region'].hidden = !next.selectedTaskId;
   elements['current-task-status'].textContent = detail?.status || (next.selectedTaskId ? '載入中' : '尚未選擇');
+  elements['current-task-status'].dataset.status = detail?.status || '';
+  const retryable = (status === 'FAILED' || status === 'WORKER_LOST');
+  const retryIntent = next.retryIntent;
+  const retryActive = retryIntent?.taskId === next.selectedTaskId;
+  const retrySubmitting = retryActive && retryIntent.phase === 'submitting';
+  elements['retry-actions'].hidden = !(retryable && next.selectedTaskId);
+  elements['retry-task'].disabled = retrySubmitting;
+  elements['retry-task'].textContent = retryActive && retryIntent.phase === 'uncertain'
+    ? '再次送出重試'
+    : '以相同需求重試';
+  elements['retry-cancel'].hidden = !(retryActive && retryIntent.phase === 'uncertain');
   if (detail) {
     const list = element('dl', 'detail-grid');
     appendDetailRow(list, '主題', detail.topic);
@@ -154,11 +168,21 @@ function renderDetail(next) {
 }
 
 function render(next) {
-  const connection = elements['connection-label'];
+  const connection = elements['connection-status'];
   const message = elements['system-message'];
-  connection.textContent = next.loading ? '載入中' : next.error ? '連線異常' : '已載入';
-  connection.closest('.connection')?.classList.toggle('is-error', Boolean(next.error));
-  connection.closest('.connection')?.classList.toggle('is-ready', !next.loading && !next.error);
+  connection.classList.toggle('is-error', Boolean(next.error));
+  connection.classList.toggle('is-ready', !next.loading && !next.error && next.connectionState === 'online');
+  connection.classList.toggle('is-reconnecting', !next.error && next.connectionState === 'reconnecting');
+  connection.classList.toggle('is-offline', !next.error && next.connectionState === 'offline');
+  elements['connection-label'].textContent = next.error
+    ? '連線異常'
+    : next.loading
+      ? '載入中'
+      : next.connectionState === 'offline'
+        ? '離線'
+        : next.connectionState === 'reconnecting'
+          ? '重新連線中'
+          : '已連線';
   message.textContent = next.error ? next.error.message : next.message;
   message.classList.toggle('is-error', Boolean(next.error));
   elements['timeline-date'].textContent = new Intl.DateTimeFormat('zh-Hant', {dateStyle: 'medium'}).format(new Date());
@@ -218,6 +242,42 @@ async function submitTask({reuse = false} = {}) {
       phase: uncertain ? 'uncertain' : 'failed', key, body, task: null,
       message: uncertain ? '結果尚未確認。可使用相同提交識別重新送出。' : safeMessage(error),
     }});
+  }
+}
+
+function markConnectionFailure() {
+  const failures = (state.snapshot.connectionFailures || 0) + 1;
+  const connectionState = failures >= 3 ? 'offline' : 'reconnecting';
+  state.set({connectionFailures: failures, connectionState});
+}
+
+function markConnectionSuccess() {
+  if (state.snapshot.connectionState === 'online' && !state.snapshot.connectionFailures) return;
+  state.set({connectionFailures: 0, connectionState: 'online'});
+}
+
+async function retrySelectedTask() {
+  const current = state.snapshot;
+  const taskId = current.selectedTaskId;
+  const detail = current.taskDetail;
+  if (!taskId || !detail) return;
+  if (detail.status !== 'FAILED' && detail.status !== 'WORKER_LOST') return;
+  const intent = current.retryIntent;
+  if (intent?.taskId === taskId && intent.phase === 'submitting') return;
+  const key = intent?.taskId === taskId ? intent.key : crypto.randomUUID();
+  state.set({retryIntent: {taskId, key, phase: 'submitting'}});
+  try {
+    const updated = await api.retryTask(taskId, key);
+    state.set({retryIntent: null, message: '任務已重新提交。'});
+    mergeTasks([updated]);
+    await selectTask(taskId);
+  } catch (error) {
+    const uncertain = error instanceof NetworkError || error instanceof TimeoutError;
+    if (uncertain) {
+      state.set({retryIntent: {taskId, key, phase: 'uncertain'}, message: '重試結果尚未確認。可再次重試，同一個提交識別會被沿用。'});
+    } else {
+      state.set({retryIntent: null, message: safeMessage(error, '目前無法重試此任務。')});
+    }
   }
 }
 
@@ -301,7 +361,9 @@ async function loadBootstrap() {
 async function loadStatus() {
   try {
     state.set({status: await api.getStatus()});
+    markConnectionSuccess();
   } catch (error) {
+    markConnectionFailure();
     state.set({message: '系統狀態暫時無法同步。'});
   }
 }
@@ -329,6 +391,10 @@ form.addEventListener('submit', (event) => {
 elements['resubmit-task'].addEventListener('click', () => submitTask({reuse: true}));
 elements['cancel-submission'].addEventListener('click', resetComposer);
 elements['new-task-button'].addEventListener('click', resetComposer);
+elements['retry-task'].addEventListener('click', retrySelectedTask);
+elements['retry-cancel'].addEventListener('click', () => {
+  state.set({retryIntent: null, message: '已取消不確定的重試。'});
+});
 elements['load-more'].addEventListener('click', () => loadTasks({append: true}));
 tabs.forEach((tab, index) => {
   tab.addEventListener('click', () => setPanel(panelFor(tab)));
@@ -350,6 +416,7 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
     loadTasks();
     loadEvents();
+    loadStatus();
   }
 });
 
@@ -360,4 +427,5 @@ setInterval(() => {
   if (document.visibilityState !== 'visible') return;
   loadTasks();
   loadEvents();
+  loadStatus();
 }, POLL_INTERVAL_MS);

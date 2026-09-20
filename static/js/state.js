@@ -6,6 +6,8 @@ export function createState(initial = {}) {
     loading: true,
     message: '正在載入',
     error: null,
+    connectionState: 'online',
+    retryIntent: null,
     draft: {content_type: 'POST', topic: '', brief: '', target_audience: '', page_purpose: ''},
     submission: {phase: 'idle', key: null, body: null, task: null, message: ''},
     tasks: [],
