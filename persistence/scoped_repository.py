@@ -96,3 +96,52 @@ class SQLiteWorkspaceRepository:
         if not valid:
             raise PersistenceError('Scoped write rejected')
         self._internal.add(record)
+
+    def public_events(self, task_id, after_sequence, limit=100):
+        rows=self._internal._conn.execute(
+            "SELECT e.* FROM task_events e JOIN tasks t ON t.task_id=e.task_id "
+            "JOIN workspaces w ON w.workspace_id=t.workspace_id "
+            "WHERE t.workspace_id=? AND w.status='ACTIVE' AND e.task_id=? "
+            "AND e.visibility='PUBLIC' AND e.sequence_number>? ORDER BY e.sequence_number LIMIT ?",
+            (self._workspace_id,task_id,after_sequence,limit))
+        return [self._internal._decode(TaskEvent,row) for row in rows]
+
+    def retry_task(self, task_id, expected_run_id, expected_status, now):
+        from uuid import uuid4
+        from domain.contracts import Status
+        self._internal._write()
+        task=self.get_task(task_id)
+        if (task is None or task.status not in (Status.FAILED,Status.WORKER_LOST)
+                or task.status!=expected_status or task.current_run_id!=expected_run_id):
+            return None
+        old=self.get_run(task_id,expected_run_id)
+        if old is None or old.status!=task.status:
+            return None
+        attempt=self._internal._conn.execute(
+            'SELECT MAX(r.attempt)+1 FROM task_runs r JOIN tasks t ON t.task_id=r.task_id '
+            'WHERE t.workspace_id=? AND t.task_id=?',(self._workspace_id,task_id)).fetchone()[0]
+        run=TaskRun(run_id=str(uuid4()),task_id=task_id,attempt=attempt,created_at=now,updated_at=now,
+            provider_connection_id=old.provider_connection_id,provider_type=old.provider_type,
+            provider_mode=old.provider_mode,model=old.model,
+            provider_configuration_version=old.provider_configuration_version)
+        self.add(run)
+        changed=self._internal._conn.execute(
+            "UPDATE tasks SET status='QUEUED',current_run_id=?,updated_at=? "
+            "WHERE workspace_id=? AND task_id=? AND current_run_id=? AND status=?",
+            (run.run_id,now,self._workspace_id,task_id,expected_run_id,expected_status.value)).rowcount
+        if changed!=1: raise PersistenceError('Retry conflict')
+        sequence=self._internal._conn.execute(
+            'SELECT COALESCE(MAX(sequence_number),0)+1 FROM task_events WHERE task_id=?',(task_id,)).fetchone()[0]
+        self.add(TaskEvent(event_id=str(uuid4()),event_key='retry:'+run.run_id,task_id=task_id,
+            run_id=run.run_id,attempt=attempt,sequence_number=sequence,type='TASK_RETRY_REQUESTED',
+            actor='system',status=Status.QUEUED,summary='任務已排入重試佇列',created_at=now))
+        return self.get_task(task_id)
+
+    def health_observation(self):
+        if self.workspace() is None: raise PersistenceError('Workspace unavailable')
+        versions=[row[0] for row in self._internal._conn.execute('SELECT version FROM schema_migrations ORDER BY version')]
+        heartbeat=self._internal._conn.execute(
+            "SELECT MAX(r.heartbeat_at) FROM task_runs r JOIN tasks t ON t.task_id=r.task_id "
+            "WHERE t.workspace_id=? AND t.current_run_id=r.run_id AND r.status IN ('CLAIMED','RUNNING')",
+            (self._workspace_id,)).fetchone()[0]
+        return versions,heartbeat
