@@ -27,28 +27,39 @@ def download_image(url):
 
 
 class LocalImages:
-    def __init__(self, root, site_id, task_id, run_id, *, downloader=download_image):
+    def __init__(self, root, site_id, task_id, run_id, *, workspace_id, downloader=download_image):
         # IDs become hashes rather than user-controlled filesystem path segments.
         self.root = Path(root).resolve()
         self.site_id, self.task_id, self.run_id = site_id, task_id, run_id
+        if type(workspace_id) is not str or not workspace_id:
+            raise ValueError("Image workspace is required")
+        self.workspace_id=workspace_id
         self.downloader = downloader
-        self.namespace = Path(sha256(site_id.encode()).hexdigest()[:16]) / sha256(task_id.encode()).hexdigest()[:32]
+        self.namespace = Path(sha256(workspace_id.encode()).hexdigest()[:16]) / sha256(site_id.encode()).hexdigest()[:16] / sha256(task_id.encode()).hexdigest()[:32]
 
     def persisted(self, artifact):
-        value = deepcopy(artifact)
-        path = value.get('local_path')
-        if path:
-            path = Path(path)
-            if path.is_absolute():
-                value['local_path'] = path.resolve().relative_to(self.root).as_posix()
-        # Provider URLs can expire and may contain signed tokens. Local file is the source.
-        value['source_url'] = None
-        return value
+        # Persist a narrow projection only; never prompt, URLs, bytes or arbitrary metadata.
+        try:
+            parsed=ImageArtifact.from_dict(artifact)
+            if not self.usable(parsed):
+                return {'status':'failed','metadata':{'code':'INVALID_LOCAL_IMAGE'}}
+            return {'artifact_id':parsed.artifact_id,'status':'ready',
+                    'local_path':Path(parsed.local_path).relative_to(self.root).as_posix(),
+                    'source_url':None,'wordpress_media_id':None,'wordpress_media_url':None,
+                    'width':parsed.width if type(parsed.width) is int else None,
+                    'height':parsed.height if type(parsed.height) is int else None,
+                    'content_type':parsed.content_type if parsed.content_type in ('image/png','image/jpeg','image/webp') else None,
+                    'metadata':{'workspace_id':self.workspace_id,'site_id':self.site_id,
+                                'task_id':self.task_id,'run_id':self.run_id,
+                                'checksum':parsed.metadata['checksum']}}
+        except (TypeError,ValueError,KeyError,AttributeError,OSError):
+            return {'status':'failed','metadata':{'code':'INVALID_LOCAL_IMAGE'}}
 
     def usable(self, artifact):
         try:
             if (artifact.status != ImageArtifactStatus.READY or not artifact.artifact_id
                     or artifact.wordpress_media_id is not None or artifact.wordpress_media_url is not None
+                    or artifact.metadata.get('workspace_id') != self.workspace_id
                     or artifact.metadata.get('site_id') != self.site_id
                     or artifact.metadata.get('task_id') != self.task_id):
                 return False
@@ -108,7 +119,7 @@ class LocalImages:
                     status=ImageArtifactStatus.READY, local_path=str(destination), prompt=prompt,
                     provider=result.provider, model=result.model, content_type=mime,
                     width=result.width, height=result.height,
-                    metadata={'site_id': self.site_id, 'task_id': self.task_id,
+                    metadata={'workspace_id':self.workspace_id,'site_id': self.site_id, 'task_id': self.task_id,
                               'run_id': self.run_id, 'checksum': sha256(data).hexdigest()})
             except Exception:
                 artifact = create_image_artifact(status=ImageArtifactStatus.FAILED,

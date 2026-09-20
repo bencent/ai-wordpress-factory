@@ -4,10 +4,11 @@ from domain.contracts import Status
 from domain.execution import RunLease
 from .codec import encode_snapshot
 from .connection import PersistenceError
+from domain.failures import SAFE_RUN_ERROR_CODES, UnsafeApprovalPolicyError
 
 
 class WorkerRepositoryMixin:
-    def _run_event(self, run, event_type, now, *, key=None, summary=None):
+    def _run_event(self, run, event_type, now, *, key=None, summary=None, metadata=None):
         key = key or str(uuid4())
         if self._conn.execute('SELECT 1 FROM task_events WHERE event_key=?',(key,)).fetchone():
             return
@@ -18,7 +19,7 @@ class WorkerRepositoryMixin:
             'INSERT INTO task_events(event_id,event_key,task_id,run_id,sequence_number,type,actor,status,'
             'summary,visibility,attempt,metadata,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
             (str(uuid4()),key,run['task_id'],run['run_id'],sequence,event_type,'worker',run['status'],
-             summary or event_type,'INTERNAL',run['attempt'],encode_snapshot({}),now))
+             summary or event_type,'INTERNAL',run['attempt'],encode_snapshot(metadata or {}),now))
 
     def _owned(self, lease, expected_status):
         return self._conn.execute(
@@ -102,17 +103,15 @@ class WorkerRepositoryMixin:
         if row is None:
             self._reject(lease,now,'fail')
             return False
-        from domain.ai_runtime import ErrorCode
-        safe_codes = {c.value for c in ErrorCode} | {'AI_INVOCATION_PERSISTENCE_FAILED','EXECUTOR_FAILED',
-            'EXECUTOR_INCOMPLETE','EXECUTOR_CANCELLED','FACTORY_VALIDATION_FAILED'}
-        if error_code not in safe_codes:
+        if error_code not in SAFE_RUN_ERROR_CODES:
             raise ValueError('Unsupported safe error code')
-        error = encode_snapshot({'code':error_code,'summary':'任務執行未完成'})
+        summary = UnsafeApprovalPolicyError.safe_summary if error_code=='UNSAFE_APPROVAL_POLICY' else '任務執行未完成'
+        error = encode_snapshot({'code':error_code,'summary':summary})
         self._conn.execute("UPDATE task_runs SET status='FAILED',finished_at=?,updated_at=?,error=? WHERE run_id=?",
                            (now,now,error,lease.run_id))
         self._conn.execute("UPDATE tasks SET status='FAILED',updated_at=? WHERE task_id=?",(now,lease.task_id))
         run = self._conn.execute('SELECT * FROM task_runs WHERE run_id=?',(lease.run_id,)).fetchone()
-        self._run_event(run,'RUN_FAILED',now,summary=error_code)
+        self._run_event(run,'RUN_FAILED',now,summary=summary if error_code=='UNSAFE_APPROVAL_POLICY' else error_code)
         return True
 
     def expire_stale_runs(self, cutoff, now):

@@ -12,6 +12,7 @@ from persistence.codec import CodecError
 from .claiming import LeaseService
 from .heartbeat import Heartbeat
 from domain.ai_runtime import ProviderFailure
+from domain.failures import UnsafeApprovalPolicyError
 from worker.providers import InvocationPersistenceFailed
 
 
@@ -44,6 +45,8 @@ class Worker:
                 try:
                     self.service.assert_active(lease)
                     self.executor(lease,heartbeat.cancelled)
+                except UnsafeApprovalPolicyError as exc:
+                    failure = exc
                 except Exception as exc:
                     failure = exc
             if heartbeat.error is not None:
@@ -57,7 +60,8 @@ class Worker:
             if self.service.finished(lease):
                 return True
             try:
-                code = ('AI_INVOCATION_PERSISTENCE_FAILED' if isinstance(failure,InvocationPersistenceFailed) else
+                code = ('UNSAFE_APPROVAL_POLICY' if isinstance(failure,UnsafeApprovalPolicyError) else
+                        'AI_INVOCATION_PERSISTENCE_FAILED' if isinstance(failure,InvocationPersistenceFailed) else
                         failure.code.value if isinstance(failure,ProviderFailure) else
                         'EXECUTOR_FAILED' if failure else 'EXECUTOR_INCOMPLETE')
                 self.service.fail(lease,code)

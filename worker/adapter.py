@@ -6,6 +6,9 @@ from state import Task as LegacyTask, TaskStatus, ContentType as LegacyContentTy
 from main import AIWordPressFactory
 from domain.contracts import Task, TaskRun, RunMode
 from domain.execution import LeaseLost
+from domain.failures import UnsafeApprovalPolicyError, require_human_policy, check_policy_sources
+from service.checkpoints import checkpoint, STAGES
+from worker.safe_logging import safe_factory_logs
 from domain.observer import ObserverError
 from service.execution import PersistingObserver, build_version, now
 from worker.claiming import LeaseService
@@ -18,7 +21,32 @@ LEGACY_HUMAN = ApprovalPolicy(mode=ApprovalPolicyMode.REQUIRE_HUMAN_REVIEW).to_d
 
 
 class BackgroundFactory(AIWordPressFactory):
+    def _workflow_error(self, error):
+        if isinstance(error,UnsafeApprovalPolicyError):
+            raise error
+        raise RuntimeError('Factory execution failed') from None
+
+    def _event_snapshot(self, task):
+        value=vars(task).copy()
+        value['status']=task.status.name
+        value['content_type']=task.content_type.name
+        value['stage']=getattr(self,'_checkpoint_stage',None)
+        value['completed_stages']=getattr(self,'_completed_stages',[])
+        value['error_code']=getattr(self,'_checkpoint_error',None)
+        return checkpoint(value,task_id=task.id,workspace_id=self.run_context.workspace_id,
+                          run_id=self.run_context.run_id,images=getattr(self,'images',None))
+
+    def _emit(self, event_type, task, stage=None):
+        if event_type=='agent_failed': self._checkpoint_error='EXECUTOR_FAILED'
+        if stage in STAGES:
+            self._checkpoint_stage=stage
+            if event_type=='agent_completed':
+                self._completed_stages=list(dict.fromkeys(getattr(self,'_completed_stages',[])+[stage]))
+        super()._emit(event_type,task,stage)
+
     def _get_agent(self, agent_type):
+        check_policy_sources(self.runtime_config)
+        for current in self.state.tasks.values(): check_policy_sources(current)
         if agent_type in ('publisher', 'learner'):
             raise RuntimeError('Publication is unavailable in Phase 8.1')
         return super()._get_agent(agent_type)
@@ -34,7 +62,7 @@ class BackgroundFactory(AIWordPressFactory):
 
     def _resolve_approval_policy(self, task):
         if task.approval_policy != LEGACY_HUMAN:
-            raise ValueError('Approval policy changed during execution')
+            raise UnsafeApprovalPolicyError()
         return ApprovalPolicy(mode=ApprovalPolicyMode.REQUIRE_HUMAN_REVIEW)
 
     def _prepare_image_artifact(self, task):
@@ -46,8 +74,9 @@ class BackgroundFactory(AIWordPressFactory):
 
 
 def map_task(task):
+    check_policy_sources(task.client_brand_snapshot)
     if task.approval_policy_snapshot != HUMAN:
-        raise ValueError('AUTO_PUBLISH is unavailable in Phase 8.1')
+        raise UnsafeApprovalPolicyError()
     request = task.request_snapshot
     for key, expected in {'site_id': task.site_id, 'content_type': task.content_type.value,
                           'topic': task.topic, 'brief': task.brief,
@@ -62,7 +91,7 @@ def map_task(task):
     client_data = snapshot.get('client_profile', {})
     brand_data = snapshot.get('brand_profile', client_data.get('brand_profile') or {})
     if client_data.get('approval_policy') not in (None, HUMAN, LEGACY_HUMAN):
-        raise ValueError('Client policy is unavailable in Phase 8.1')
+        raise UnsafeApprovalPolicyError()
     client_data['approval_policy'] = deepcopy(LEGACY_HUMAN)
     client = ClientProfile.from_dict(client_data)
     brand = BrandProfile.from_dict(brand_data)
@@ -105,6 +134,8 @@ class FactoryAdapter:
         cfg = self.config_resolver(task.site_id)
         if not isinstance(cfg, Config):
             raise ValueError('Explicit runtime config is required')
+        check_policy_sources(cfg)
+        check_policy_sources(legacy)
         cfg = deepcopy(cfg)
         # Worker agents never need WordPress credentials.
         cfg.wordpress_url = cfg.wordpress_username = cfg.wordpress_password = cfg.wordpress_app_password = ''
@@ -114,11 +145,12 @@ class FactoryAdapter:
         factory = self.factory_class.for_run(legacy, cfg,providers=session.bundle,
                                             workspace_id=lease.workspace_id,run_id=lease.run_id)
         options = {} if self.image_downloader is None else {'downloader': self.image_downloader}
-        images = LocalImages(self.image_root, task.site_id, task.task_id, run.run_id, **options)
+        images = LocalImages(self.image_root, task.site_id, task.task_id, run.run_id, workspace_id=lease.workspace_id, **options)
         factory.images = images
         observer = PersistingObserver(self.store, lease, cancelled, images)
         try:
-            factory.run_workflow(task.task_id, observer=GuardedObserver(session,observer))
+            with safe_factory_logs():
+                factory.run_workflow(task.task_id, observer=GuardedObserver(session,observer))
         except ObserverError:
             if session.failure is not None:
                 raise session.failure
@@ -142,6 +174,9 @@ class FactoryAdapter:
             if not images.usable(artifact):
                 raise ValueError('Image is not usable')
             image_data = images.persisted(artifact.to_dict())
+        check_policy_sources(cfg)
+        check_policy_sources(legacy)
+        check_policy_sources(factory.runtime_config)
         version = build_version(task, legacy, image_data)
         with self.store.transaction() as repo:
             accepted = repo.complete_content_version(lease, version,

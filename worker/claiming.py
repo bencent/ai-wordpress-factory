@@ -1,6 +1,7 @@
 """Ownership operations; rejection audit commits before LeaseLost is raised."""
 from datetime import datetime, timezone, timedelta
 from domain.execution import LeaseLost, validate_interval
+from domain.failures import SAFE_RUN_ERROR_CODES
 
 
 def utc_now():
@@ -44,8 +45,7 @@ class LeaseService:
             raise LeaseLost()
 
     def fail(self, lease, code='EXECUTOR_FAILED'):
-        from domain.ai_runtime import ErrorCode
-        if code not in {c.value for c in ErrorCode} | {'AI_INVOCATION_PERSISTENCE_FAILED','EXECUTOR_FAILED','EXECUTOR_INCOMPLETE','EXECUTOR_CANCELLED'}:
+        if code not in SAFE_RUN_ERROR_CODES:
             raise ValueError('Unsupported safe error code')
         with self.store.transaction() as repo:
             accepted = repo.fail_run(lease,self._now().isoformat(timespec='microseconds'),code)

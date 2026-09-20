@@ -109,7 +109,7 @@ def test_real_workflow_completion(store,tmp_path,kind,enabled,visual):
         assert version.image_data['wordpress_media_id'] is None
         assert (tmp_path/'images'/version.image_data['local_path']).is_file()
     assert run.workflow_state['id']==task.task_id
-    assert events[-1].type=='CONTENT_VERSION_CREATED'
+    assert events[-1].type=='TASK_AWAITING_APPROVAL'
     assert [e.sequence_number for e in events]==list(range(1,len(events)+1))
     assert any(e.type=='FACTORY_CHECKPOINT_PRODUCED' for e in events)
 
@@ -121,7 +121,7 @@ def test_agent_failure_does_not_stop_next_task(store,tmp_path):
     worker.run_once()
     failed,run,version,events=read(store,first)
     assert failed.status==Status.FAILED and version is None
-    assert run.error['code']=='FACTORY_VALIDATION_FAILED'
+    assert run.error['code']=='EXECUTOR_FAILED'
     assert 'SECRET' not in str(run.error) and 'SECRET' not in str(events)
     Harness.options={}
     worker.run_once()
@@ -187,7 +187,7 @@ def test_policy_and_identity_rejected(store):
 
 def test_local_ready_reuse_and_tampering(tmp_path):
     from state import Task as LegacyTask
-    images=LocalImages(tmp_path,'site','task','run',downloader=lambda _:PNG)
+    images=LocalImages(tmp_path,'site','task','run',workspace_id='w',downloader=lambda _:PNG)
     task=LegacyTask(id='task',title='image')
     agent=Mock()
     agent._build_image_prompt.return_value='image'
@@ -198,7 +198,7 @@ def test_local_ready_reuse_and_tampering(tmp_path):
     task.image_artifact=images.persisted(artifact.to_dict())
     assert images.prepare(task,Mock(side_effect=AssertionError('regeneration'))).status==ImageArtifactStatus.READY
     assert agent.provider.generate.call_count==1
-    assert not LocalImages(tmp_path,'other','task','run').usable(artifact)
+    assert not LocalImages(tmp_path,'other','task','run',workspace_id='w').usable(artifact)
     path.write_bytes(b'corrupt')
     assert images.prepare(task,Mock(side_effect=AssertionError('regeneration'))).status==ImageArtifactStatus.FAILED
 

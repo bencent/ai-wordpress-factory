@@ -110,6 +110,12 @@ class AIWordPressFactory:
     def runtime_config(self):
         return self._config if self._isolated else config
 
+    def _event_snapshot(self, task):
+        return deepcopy(task.to_dict())
+
+    def _workflow_error(self, error):
+        return classify_error(error).safe_summary
+
     def _emit(self, event_type, task, stage=None):
         if self._observing_task is None or isinstance(self._observer, NoOpObserver):
             return
@@ -120,7 +126,7 @@ class AIWordPressFactory:
                 workflow_id=self._workflow_id, sequence_number=self._sequence,
                 task_id=task.id, type=event_type, stage=stage,
                 created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                snapshot=deepcopy(task.to_dict()),
+                snapshot=self._event_snapshot(task),
             )
             self._observer.on_event(event)
         except Exception:
@@ -293,7 +299,8 @@ class AIWordPressFactory:
             review_passed = False
             review_result = None
             
-            while task.retry_count < task.max_retries:
+            # Initial evaluation is mandatory; the budget counts only subsequent retries.
+            while True:
                 self.state.update_task_status(task_id, TaskStatus.REVIEWING)
                 evaluator = self._get_agent("quality_evaluator")
                 if evaluator:
@@ -308,8 +315,7 @@ class AIWordPressFactory:
                     logger.info(f"任務 {task_id} 審閱通過，分數: {review_result.score}")
                     break
                 
-                task.retry_count += 1
-                logger.warning(f"任務 {task_id} 審閱未通過，重試次數: {task.retry_count}/{task.max_retries}")
+                logger.warning(f"任務 {task_id} 審閱未通過，已重試次數: {task.retry_count}/{task.max_retries}")
                 
                 if task.retry_count >= task.max_retries:
                     logger.error(f"任務 {task_id} 超過最大重試次數")
@@ -324,8 +330,11 @@ class AIWordPressFactory:
                         action = router.decide(review_result, task)
                     logger.info(f"任務 {task_id} Router 決策: {action}")
                     
+                    if action in ("rewrite", "research", "seo"):
+                        task.retry_count += 1
                     if action == "rewrite":
                         task.draft_content = self._rewrite_content(task, review_result)
+                        task.revised_content = task.optimized_content = task.draft_content
                         continue
                     elif action == "research":
                         self.state.update_task_status(task_id, TaskStatus.RESEARCHING)
@@ -334,6 +343,7 @@ class AIWordPressFactory:
                             with self._agent_step(task, "research"):
                                 task.research_data = research_agent.gather_research(task)
                         task.draft_content = self._rewrite_content(task, review_result)
+                        task.revised_content = task.optimized_content = task.draft_content
                         continue
                     elif action == "seo":
                         self.state.update_task_status(task_id, TaskStatus.OPTIMIZING)
@@ -342,9 +352,12 @@ class AIWordPressFactory:
                             with self._agent_step(task, "seo"):
                                 optimized_content, _ = seo_agent.optimize_content(task)
                                 task.optimized_content = optimized_content
+                                task.revised_content = optimized_content
                         continue
                     else:
                         break
+                else:
+                    break
             
             if not review_passed:
                 return False
@@ -868,11 +881,12 @@ class AIWordPressFactory:
         except ObserverError:
             raise
         except Exception as e:
-            logger.error(f"任務 {task_id} 失敗: {str(e)}")
+            safe_error = self._workflow_error(e)
+            logger.error(f"任務 {task_id} 失敗: {safe_error}")
             self.state.update_task_status(
                 task_id, 
                 TaskStatus.FAILED, 
-                error_message=str(e)
+                error_message=safe_error
             )
             return False
 

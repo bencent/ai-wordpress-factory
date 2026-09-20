@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 from domain.contracts import ContentVersion
 from domain.execution import LeaseLost
+from service.checkpoints import checkpoint
 
 
 def now():
@@ -16,10 +17,8 @@ class PersistingObserver:
         self.error = None
 
     def snapshot(self, value):
-        value = deepcopy(value)
-        if value.get('image_artifact') is not None:
-            value['image_artifact'] = self.images.persisted(value['image_artifact'])
-        return value
+        return checkpoint(value,task_id=self.lease.task_id,workspace_id=self.lease.workspace_id,
+                          run_id=self.lease.run_id,images=self.images)
 
     def on_event(self, event):
         try:
@@ -49,7 +48,7 @@ def build_version(task, legacy, image_data):
     if conversion.get('success') is not True or not isinstance(content, str) or not content.strip():
         raise ValueError('Converted content is missing')
     visual = legacy.visual_quality_result or {}
-    if visual.get('action') not in ('PASS', 'HUMAN_REVIEW', 'pass', 'human_review'):
+    if visual.get('action') not in ('PASS', 'WARN', 'HUMAN_REVIEW', 'pass', 'warn', 'human_review'):
         raise ValueError('Visual review is incomplete')
     gates['visual_quality'] = visual
     created = now()

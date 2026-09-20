@@ -70,7 +70,7 @@ class Task:
     optimized_content: Optional[str] = None
     final_content: Optional[str] = None
     
-    # Retry 保護 (Content retry)
+    # Content retries after the mandatory initial quality evaluation; excludes the initial attempt.
     retry_count: int = 0
     max_retries: int = 3
     
