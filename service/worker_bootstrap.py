@@ -12,7 +12,6 @@ from persistence.repository import SQLiteStore
 from persistence.migration_runner import migrate
 from worker.adapter import FactoryAdapter
 from worker.loop import Worker
-from worker.providers import provider_from_connection, EnvironmentCredentialResolver
 
 
 class WorkerBootstrapError(RuntimeError):
@@ -56,6 +55,8 @@ def build_worker(
     stale_seconds: float = 60.0,
     run_once: bool = False,
     image_root: Optional[str] = None,
+    provider_factory=None,
+    credential_resolver=None,
 ) -> Worker:
     """
     Construct a fully-wired Worker from production dependencies.
@@ -98,12 +99,17 @@ def build_worker(
     config_resolver = _make_config_resolver(store, workspace_id)
     img_root = Path(image_root or 'artifacts/images').resolve()
 
+    adapter_options = {}
+    if provider_factory is not None:
+        adapter_options['provider_factory'] = provider_factory
+    if credential_resolver is not None:
+        adapter_options['credential_resolver'] = credential_resolver
+
     adapter = FactoryAdapter(
         store=store,
         config_resolver=config_resolver,
         image_root=img_root,
-        provider_factory=provider_from_connection,
-        credential_resolver=EnvironmentCredentialResolver(),
+        **adapter_options,
     )
 
     return Worker(

@@ -9,8 +9,40 @@ An optional `snapshot` uses the existing credential-free SubmissionProfile contr
 Missing or unmatched profiles fail closed. Workspace ownership is verified by the existing scoped submission service.
 The client cannot choose a Workspace. The backend resolves the active default Workspace.
 
-Start locally: `python -m uvicorn api.app:app --host 127.0.0.1 --port 8000`
-Run the existing Worker separately. This slice has no login, public deployment configuration, UI, approval or publishing routes.
+The API and Worker run as two independent processes. In Windows PowerShell,
+start each process in its own terminal using the same `AIWF_DATABASE` and
+`AIWF_PROFILES_FILE` environment settings.
+
+Terminal 1 — API:
+
+```powershell
+python -m uvicorn api.app:app --host 127.0.0.1 --port 8000
+```
+
+Terminal 2 — Worker:
+
+```powershell
+python -m worker
+```
+
+For diagnosis or a single queued-task attempt, run:
+
+```powershell
+python -m worker --once
+```
+
+The polling interval is optional and is expressed in seconds:
+
+```powershell
+python -m worker --poll-seconds 1
+```
+
+Provider credentials are resolved through the existing `env:` credential
+references. Never place credential values on the command line or in the
+profiles file. systemd, Docker, Windows Service integration, and automatic
+restart configuration are deferred to Phase 8.6. This slice does not document
+public-network binding or production authentication. It has no login, public
+deployment configuration, UI, approval, or publishing routes.
 
 ## Routes
 

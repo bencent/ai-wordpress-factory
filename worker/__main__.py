@@ -2,7 +2,12 @@
 import argparse
 import sys
 
-from service.worker_bootstrap import build_worker, run_worker, WorkerBootstrapError
+# Test seams remain inert until main() has parsed CLI arguments. Production
+# dependencies are imported lazily so module import and --help have no runtime
+# configuration or credential side effects.
+build_worker = None
+run_worker = None
+WorkerBootstrapError = None
 
 
 def _parse_args() -> argparse.Namespace:
@@ -55,9 +60,23 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    global build_worker, run_worker, WorkerBootstrapError
     args = _parse_args()
 
     try:
+        if build_worker is None or run_worker is None or WorkerBootstrapError is None:
+            from service.worker_bootstrap import (
+                WorkerBootstrapError as bootstrap_error,
+                build_worker as production_build_worker,
+                run_worker as production_run_worker,
+            )
+            if build_worker is None:
+                build_worker = production_build_worker
+            if run_worker is None:
+                run_worker = production_run_worker
+            if WorkerBootstrapError is None:
+                WorkerBootstrapError = bootstrap_error
+
         worker = build_worker(
             database_path=args.database,
             profiles_path=args.profiles,
@@ -67,14 +86,14 @@ def main() -> int:
             run_once=args.once,
             image_root=args.image_root,
         )
-    except WorkerBootstrapError as e:
-        print(f'Configuration error: {e}', file=sys.stderr)
+    except Exception:
+        print('Worker configuration failed.', file=sys.stderr)
         return 1
 
     try:
         return run_worker(worker, poll_seconds=args.poll_seconds, run_once=args.once)
-    except WorkerBootstrapError as e:
-        print(f'Worker error: {e}', file=sys.stderr)
+    except Exception:
+        print('Worker execution failed.', file=sys.stderr)
         return 2
 
 
