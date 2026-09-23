@@ -160,11 +160,22 @@ def test_completion_transaction_rolls_back(store,tmp_path):
     with store.factory.connection() as conn:
         assert conn.execute('SELECT count(*) FROM content_versions').fetchone()[0]==0
 
-def test_observer_database_failure_propagates(store,tmp_path):
-    task=submit(store)
-    with patch.object(SQLiteRepository,'record_workflow_event',side_effect=PersistenceError('injected')),pytest.raises(PersistenceError):
-        Worker(store,adapter(store,tmp_path)).run_once()
-    assert read(store,task)[0].status==Status.RUNNING
+def test_observer_database_failure_fails_safely(store, tmp_path):
+    task = submit(store)
+    with patch.object(SQLiteRepository, 'record_workflow_event',
+                      side_effect=PersistenceError('observer-integration-canary')):
+        result = Worker(store, adapter(store, tmp_path)).run_once()
+    assert result is True
+    task, run, version, events = read(store, task)
+    assert task.status == run.status == Status.FAILED
+    assert version is None
+    assert run.finished_at is not None
+    assert run.error['code'] == 'EXECUTOR_FAILED'
+    assert events[-1].type == 'RUN_FAILED'
+    assert 'observer-integration-canary' not in str(run.error)
+    for event in events:
+        assert 'observer-integration-canary' not in str(event.summary)
+        assert 'observer-integration-canary' not in str(event.metadata)
     assert not Harness.seen[-1][2]['agents']['planner'].create_plan.called
 
 def test_lost_worker_cannot_complete(store,tmp_path):

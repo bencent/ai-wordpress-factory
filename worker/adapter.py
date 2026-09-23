@@ -15,6 +15,8 @@ from worker.claiming import LeaseService
 from worker.local_images import LocalImages
 from worker.providers import ProviderSession, GuardedObserver
 from providers.composition import provider_from_connection
+from persistence.connection import PersistenceError
+from persistence.codec import CodecError
 
 HUMAN = {'mode': 'REQUIRE_HUMAN_REVIEW'}
 LEGACY_HUMAN = ApprovalPolicy(mode=ApprovalPolicyMode.REQUIRE_HUMAN_REVIEW).to_dict()
@@ -154,6 +156,10 @@ class FactoryAdapter:
         except ObserverError:
             if session.failure is not None:
                 raise session.failure
+            if isinstance(observer.error, LeaseLost):
+                raise observer.error
+            if isinstance(observer.error, (PersistenceError, CodecError)):
+                raise
             if observer.error is not None:
                 raise observer.error
             raise

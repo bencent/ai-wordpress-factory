@@ -7,16 +7,19 @@ import time
 
 import pytest
 
+from config import Config
 from domain.contracts import Task,TaskRun,Status
 from domain.execution import LeaseLost, RunLease
 from domain.submission import SubmissionProfile
 from persistence.connection import ConnectionFactory,PersistenceError
+from persistence.codec import CodecError
 from persistence.migration_runner import migrate
 from persistence.repository import SQLiteStore
 from service.submission import TaskSubmissionService
 from worker.claiming import LeaseService
 from worker.heartbeat import Heartbeat
 from worker.loop import Worker
+from worker.adapter import FactoryAdapter
 
 
 @pytest.fixture
@@ -328,3 +331,163 @@ def test_lost_lease_cancels_heartbeat_without_reviving_run(store):
         assert heartbeat.cancelled.wait(2)
     assert isinstance(heartbeat.error,LeaseLost)
     assert read_run(store,task).status==Status.WORKER_LOST
+
+
+class ObserverStorageFailure:
+    """Error type + canary for observer persistence/codec failure characterization."""
+
+    def __init__(self, error_cls, canary, name):
+        self.error_cls = error_cls
+        self.canary = canary
+        self.name = name
+
+    def __str__(self):
+        return self.name
+
+
+PERSISTENCE = ObserverStorageFailure(
+    error_cls=PersistenceError,
+    canary="observer-sql-credential-canary",
+    name="PersistenceError"
+)
+
+CODEC = ObserverStorageFailure(
+    error_cls=CodecError,
+    canary="observer-codec-canary-\u0000\u001f",
+    name="CodecError"
+)
+
+
+@pytest.mark.parametrize("failure", [PERSISTENCE, CODEC], ids=str)
+def test_observer_storage_failure_fails_task_and_run_safely(store, tmp_path, monkeypatch, caplog, failure):
+    """
+    Observer persistence/codec failure during workflow event recording must:
+    - Not be silently swallowed
+    - Fail the TaskRun with a safe error classification
+    - Not leak the raw exception message (canary) into persisted state
+    - Preserve events recorded before the failure
+    - Not create a ContentVersion
+    """
+    CANARY = failure.canary
+
+    task = submit(store, 'observer-fail-test')
+
+    # Build a fake provider that does nothing but succeed
+    class SilentProvider:
+        calls = 0
+        def complete(self, request):
+            self.calls += 1
+            from domain.ai_runtime import TextResult
+            return TextResult(content="ok", provider_type="OPENAI", model="test-model",
+                              input_tokens=1, output_tokens=1, total_tokens=2, latency_ms=5)
+        def generate(self, request):
+            self.calls += 1
+            from contracts import ImageGenerationResult
+            return ImageGenerationResult(success=True, provider="openai", model="dall-e",
+                                         image_bytes=b"x", image_url="data:image/png;base64,x")
+        def review(self, request):
+            self.calls += 1
+            from providers.visual_quality_provider import VisualReviewResult
+            from contracts import VisualQualityAction
+            return VisualReviewResult(success=True, action=VisualQualityAction.PASS,
+                                      summary="ok", reviewed_viewports=["desktop", "mobile"])
+
+    fake_provider = SilentProvider()
+
+    # Create a FactoryAdapter that uses our fake provider
+    def config_resolver(site_id):
+        cfg = Config(agents={'image': {'enabled': True}})
+        # Worker agents never need WordPress credentials
+        cfg.wordpress_url = cfg.wordpress_username = cfg.wordpress_password = cfg.wordpress_app_password = ''
+        return cfg
+
+    adapter = FactoryAdapter(
+        store=store,
+        config_resolver=config_resolver,
+        image_root=tmp_path / 'images',
+        provider_factory=lambda *args, **kwargs: fake_provider,
+    )
+
+    # Inject failure into record_workflow_event exactly once
+    original_record_workflow_event = None
+    call_count = 0
+
+    def failing_record_workflow_event(self, lease, event, snapshot, created_at):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # First call: raise the failure type with canary
+            raise failure.error_cls(CANARY)
+        # Subsequent calls (e.g., service.fail transaction) should work normally
+        return original_record_workflow_event(self, lease, event, snapshot, created_at)
+
+    # Patch the repository method
+    from persistence.execution_repository import ExecutionRepositoryMixin
+    original_record_workflow_event = ExecutionRepositoryMixin.record_workflow_event
+    monkeypatch.setattr(ExecutionRepositoryMixin, 'record_workflow_event', failing_record_workflow_event)
+
+    # Run the worker once
+    worker = Worker(store, adapter, heartbeat_seconds=0.01, stale_seconds=1)
+    result = worker.run_once()
+
+    # Assert: Canary does NOT appear in captured logs
+    assert CANARY not in caplog.text, f"Canary leaked in logs: {caplog.text}"
+
+    # Assert: Worker run_once completed failure handling
+    assert result is True  # True means a task was processed (even if failed)
+
+    # Assert: Task status is FAILED
+    with store.reader() as repo:
+        task_db = repo.get(Task, task.task_id)
+        assert task_db.status == Status.FAILED
+
+        # Assert: TaskRun status is FAILED
+        run_db = repo.get(TaskRun, task.current_run_id)
+        assert run_db.status == Status.FAILED
+
+        # Assert: Error code is a safe classification (EXECUTOR_FAILED)
+        assert run_db.error is not None
+        assert run_db.error.get('code') == 'EXECUTOR_FAILED'
+
+        # Assert: Canary does NOT appear in Task/Run error
+        error_str = str(run_db.error)
+        assert CANARY not in error_str, f"Canary leaked in run error: {error_str}"
+
+        # Assert: No ContentVersion was created
+        assert task_db.latest_content_version_id is None
+
+        # Assert: Events recorded before observer failure are preserved
+        events = repo.events(task.task_id)
+        event_types = [e.type for e in events]
+        # Should have at least TASK_CREATED, RUN_CLAIMED, RUN_STARTED
+        assert 'TASK_CREATED' in event_types
+        assert 'RUN_CLAIMED' in event_types
+        assert 'RUN_STARTED' in event_types
+        # RUN_FAILED should be recorded by service.fail
+        assert 'RUN_FAILED' in event_types
+
+        # Assert: Sequence numbers are strictly increasing, no duplicates
+        sequences = [e.sequence_number for e in events]
+        assert sequences == sorted(sequences), "Sequence numbers not strictly increasing"
+        assert len(sequences) == len(set(sequences)), "Duplicate sequence numbers"
+
+        # Assert: Canary does NOT appear in any TaskEvent summary/metadata
+        for event in events:
+            assert CANARY not in str(event.summary), f"Canary leaked in event summary: {event.summary}"
+            assert CANARY not in str(event.metadata), f"Canary leaked in event metadata: {event.metadata}"
+
+        # Assert: Canary does NOT appear in AIInvocation
+        invocations = repo.invocations(run_db.run_id)
+        for inv in invocations:
+            assert CANARY not in str(inv.classified_error), f"Canary leaked in invocation: {inv.classified_error}"
+
+    # Assert: Lease/fencing rules still hold - the run is terminal
+    lease = RunLease(
+        run_id=run_db.run_id,
+        task_id=run_db.task_id,
+        owner_id=run_db.owner_id,
+        fencing_token=run_db.fencing_token,
+        workspace_id=task.workspace_id
+    )
+    # Heartbeat on a failed run should return False (not revive)
+    assert LeaseService(store).heartbeat(lease) is False
