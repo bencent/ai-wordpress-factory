@@ -30,6 +30,12 @@ class Capability(str, Enum):
     VISUAL_QUALITY = 'VISUAL_QUALITY'
 
 
+GROQ_DEFAULT_MODEL = 'qwen/qwen3.8-27b'
+GROQ_CREDENTIAL_REFERENCE = 'env:GROQ_API_KEY'
+GROQ_CAPABILITIES = (Capability.TEXT, Capability.VISUAL_QUALITY)
+GROQ_REASONING_EFFORT = 'none'
+
+
 class VerificationStatus(str, Enum):
     UNVERIFIED = 'UNVERIFIED'
     VERIFIED = 'VERIFIED'
@@ -100,7 +106,7 @@ class AIProviderConnection:
     non_secret_configuration: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
-        if self.provider_type != 'OPENAI':
+        if self.provider_type not in ('OPENAI', 'GROQ'):
             raise ContractError()
         if not isinstance(self.provider_mode, ProviderMode) or not isinstance(self.verification_status, VerificationStatus):
             raise ContractError()
@@ -139,7 +145,7 @@ class AIInvocation:
     classified_error: ProviderError | None = None
 
     def __post_init__(self):
-        if (self.provider_type != 'OPENAI' or not isinstance(self.capability,Capability)
+        if (self.provider_type not in ('OPENAI', 'GROQ') or not isinstance(self.capability,Capability)
                 or not isinstance(self.status,InvocationStatus)):
             raise ContractError()
         for value in (self.input_tokens,self.output_tokens,self.total_tokens,self.latency_ms):

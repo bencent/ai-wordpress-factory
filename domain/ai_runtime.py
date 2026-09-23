@@ -13,6 +13,7 @@ class ErrorCode(str, Enum):
     RATE_LIMITED = 'RATE_LIMITED'
     TIMEOUT = 'TIMEOUT'
     UNAVAILABLE = 'UNAVAILABLE'
+    INVALID_REQUEST = 'INVALID_REQUEST'
     INVALID_RESPONSE = 'INVALID_RESPONSE'
     UNSUPPORTED_CAPABILITY = 'UNSUPPORTED_CAPABILITY'
     UNKNOWN = 'UNKNOWN'
@@ -40,6 +41,8 @@ def classify_error(error):
         code = ErrorCode.TIMEOUT
     elif name in ('APIConnectionError','InternalServerError') or (type(status) is int and status>=500):
         code = ErrorCode.UNAVAILABLE
+    elif name == 'BadRequestError' or (type(status) is int and status == 400):
+        code = ErrorCode.INVALID_REQUEST
     elif name == 'APIResponseValidationError':
         code = ErrorCode.INVALID_RESPONSE
     else:

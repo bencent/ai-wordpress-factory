@@ -4,9 +4,9 @@ import re
 from types import SimpleNamespace
 from domain.ai_runtime import ProviderBundle, ProviderFailure, ErrorCode
 from domain.providers import Capability
-from providers.text_provider import OpenAITextProvider
+from providers.text_provider import OpenAITextProvider, GroqTextProvider
 from providers.image_provider import OpenAIImageProvider
-from providers.visual_quality_provider import create_visual_quality_provider, OpenAIVisualQualityProvider
+from providers.visual_quality_provider import create_visual_quality_provider, OpenAIVisualQualityProvider, GroqVisualQualityProvider
 
 
 class EnvironmentCredentialResolver:
@@ -20,17 +20,23 @@ class EnvironmentCredentialResolver:
 
 
 def provider_from_connection(connection, capability, resolver=None):
-    if capability not in connection.capabilities or connection.provider_type != 'OPENAI':
+    if capability not in connection.capabilities or connection.provider_type not in ('OPENAI', 'GROQ'):
         raise ProviderFailure(ErrorCode.UNSUPPORTED_CAPABILITY)
     secret = (resolver or EnvironmentCredentialResolver()).resolve(connection.credential_reference)
     if capability == Capability.TEXT:
-        return OpenAITextProvider(secret,connection.default_model)
+        if connection.provider_type == 'OPENAI':
+            return OpenAITextProvider(secret, connection.default_model)
+        return GroqTextProvider(secret, connection.default_model)
     # No Config constructor: explicit credentials cannot be replaced by global environment.
-    options = SimpleNamespace(openai_api_key=secret,visual_quality_model=connection.default_model)
+    options = SimpleNamespace(openai_api_key=secret, visual_quality_model=connection.default_model)
     if capability == Capability.IMAGE:
-        return OpenAIImageProvider(options,model=connection.default_model)
+        if connection.provider_type == 'GROQ':
+            raise ProviderFailure(ErrorCode.UNSUPPORTED_CAPABILITY)
+        return OpenAIImageProvider(options, model=connection.default_model)
     if capability == Capability.VISUAL_QUALITY:
-        return OpenAIVisualQualityProvider(options)
+        if connection.provider_type == 'OPENAI':
+            return OpenAIVisualQualityProvider(options)
+        return GroqVisualQualityProvider(secret, connection.default_model)
     raise ProviderFailure(ErrorCode.UNSUPPORTED_CAPABILITY)
 
 

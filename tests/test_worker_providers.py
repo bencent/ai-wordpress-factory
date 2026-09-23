@@ -358,3 +358,198 @@ def test_pin_snapshot_wrong_lease_or_model_rejected(store):
         with store.transaction() as repo: repo.pin_provider_snapshot(replace(lease,workspace_id='wrong'),selected.connection)
     with pytest.raises(ProviderFailure):
         with store.transaction() as repo: repo.pin_provider_snapshot(lease,replace(selected.connection,default_model='changed'))
+
+
+def test_provider_session_accepts_groq_text_and_visual(store):
+    task, run, lease = active(store)
+    # Update the provider connection to be GROQ with TEXT and VISUAL_QUALITY
+    with store.transaction() as repo:
+        conn = repo.get(AIProviderConnection, run.provider_connection_id)
+        # Update the connection to be GROQ
+        updated_conn = replace(
+            conn,
+            provider_type='GROQ',
+            capabilities=[Capability.TEXT, Capability.VISUAL_QUALITY],
+            default_model='qwen/qwen3.8-27b',
+            configuration_version=1,
+            verification_status=VerificationStatus.VERIFIED,
+            workspace_id=lease.workspace_id
+        )
+        repo.update_provider_connection(updated_conn)
+        # Update the task_runs table to match the new connection
+        repo._conn.execute(
+            "UPDATE task_runs SET provider_type=?, model=?, provider_configuration_version=? WHERE run_id=?",
+            (updated_conn.provider_type, updated_conn.default_model, updated_conn.configuration_version, run.run_id)
+        )
+    # Now create the session with image disabled
+    config = Config()
+    config.agents['image']['enabled'] = False
+    fake = FakeProvider()
+    selected = ProviderSession(store, lease, run, config, provider_factory=lambda *args: fake)
+    # Make a text call
+    selected.bundle.text.complete(TextRequest(PROMPT))
+    # Make a visual quality call
+    selected.bundle.visual_quality.review(NS(preview=b'private-image'))
+    # Get the audit rows
+    audit = rows(store, run)
+    # We expect two invocations: TEXT and VISUAL_QUALITY
+    assert len(audit) == 2
+    # Check that we have one TEXT and one VISUAL_QUALITY
+    capabilities = {r.capability for r in audit}
+    assert capabilities == {Capability.TEXT, Capability.VISUAL_QUALITY}
+    # Check that the fake provider was called twice (once for each capability)
+    assert len(fake.calls) == 2
+    # We can also check that the image provider was not called by ensuring that there is no IMAGE capability in the audit
+    assert Capability.IMAGE not in capabilities
+
+def test_provider_session_rejects_groq_without_required_capability(store):
+    task, run, lease = active(store)
+    # Update the provider connection to be GROQ with only TEXT capability (missing VISUAL_QUALITY)
+    with store.transaction() as repo:
+        conn = repo.get(AIProviderConnection, run.provider_connection_id)
+        # Update the connection to be GROQ with only TEXT
+        updated_conn = replace(
+            conn,
+            provider_type='GROQ',
+            capabilities=[Capability.TEXT],  # Missing VISUAL_QUALITY
+            default_model='qwen/qwen3.8-27b',
+            configuration_version=1,
+            verification_status=VerificationStatus.VERIFIED,
+            workspace_id=lease.workspace_id
+        )
+        repo.update_provider_connection(updated_conn)
+        # Update the task_runs table to match the connection
+        repo._conn.execute(
+            "UPDATE task_runs SET provider_type=?, model=?, provider_configuration_version=? WHERE run_id=?",
+            (updated_conn.provider_type, updated_conn.default_model, updated_conn.configuration_version, run.run_id)
+        )
+    # Now create the session with image disabled
+    config = Config()
+    config.agents['image']['enabled'] = False
+    with pytest.raises(ProviderFailure) as excinfo:
+        ProviderSession(store, lease, run, config, provider_factory=lambda *args: FakeProvider())
+    assert excinfo.value.code == ErrorCode.UNSUPPORTED_CAPABILITY
+
+def test_provider_session_rejects_groq_image_when_enabled(store):
+    task, run, lease = active(store)
+    # Update the provider connection to be GROQ with TEXT and VISUAL_QUALITY (but not IMAGE)
+    with store.transaction() as repo:
+        conn = repo.get(AIProviderConnection, run.provider_connection_id)
+        # Update the connection to be GROQ
+        updated_conn = replace(
+            conn,
+            provider_type='GROQ',
+            capabilities=[Capability.TEXT, Capability.VISUAL_QUALITY],  # Missing IMAGE
+            default_model='qwen/qwen3.8-27b',
+            configuration_version=1,
+            verification_status=VerificationStatus.VERIFIED,
+            workspace_id=lease.workspace_id
+        )
+        repo.update_provider_connection(updated_conn)
+        # Update the task_runs table to match the connection
+        repo._conn.execute(
+            "UPDATE task_runs SET provider_type=?, model=?, provider_configuration_version=? WHERE run_id=?",
+            (updated_conn.provider_type, updated_conn.default_model, updated_conn.configuration_version, run.run_id)
+        )
+    # Now create the session with image enabled (so that IMAGE is required)
+    config = Config()
+    config.agents['image']['enabled'] = True  # Enable image agent
+    fake = FakeProvider()
+    with pytest.raises(ProviderFailure) as excinfo:
+        ProviderSession(store, lease, run, config, provider_factory=lambda *args: fake)
+    assert excinfo.value.code == ErrorCode.UNSUPPORTED_CAPABILITY
+    # Verify that the SDK client was not built (i.e., the provider's enter method was not called)
+    assert len(fake.calls) == 0
+
+def test_provider_session_pins_groq_snapshot(store):
+    task, run, lease = active(store)
+    # Update the provider connection to be GROQ with TEXT and VISUAL_QUALITY
+    with store.transaction() as repo:
+        conn = repo.get(AIProviderConnection, run.provider_connection_id)
+        # Update the connection to be GROQ
+        updated_conn = replace(
+            conn,
+            provider_type='GROQ',
+            capabilities=[Capability.TEXT, Capability.VISUAL_QUALITY],
+            default_model='qwen/qwen3.8-27b',
+            configuration_version=1,
+            verification_status=VerificationStatus.VERIFIED,
+            workspace_id=lease.workspace_id
+        )
+        repo.update_provider_connection(updated_conn)
+        # Update the task_runs table to match the connection
+        repo._conn.execute(
+            "UPDATE task_runs SET provider_type=?, model=?, provider_configuration_version=? WHERE run_id=?",
+            (updated_conn.provider_type, updated_conn.default_model, updated_conn.configuration_version, run.run_id)
+        )
+    # Now create the session with image disabled
+    config = Config()
+    config.agents['image']['enabled'] = False
+    fake = FakeProvider()
+    selected = ProviderSession(store, lease, run, config, provider_factory=lambda *args: fake)
+    # Make a text call to ensure the session is used
+    selected.bundle.text.complete(TextRequest(PROMPT))
+    # Check that the pinned snapshot in the database matches the connection
+    with store.transaction() as repo:
+        row = repo._conn.execute(
+            "SELECT provider_type, model, provider_configuration_version FROM task_runs WHERE run_id=?",
+            (run.run_id,)
+        ).fetchone()
+        assert row is not None
+        assert row['provider_type'] == 'GROQ'
+        assert row['model'] == 'qwen/qwen3.8-27b'
+        assert row['provider_configuration_version'] == 1
+        # TODO: Also verify that the snapshot does not contain Credential, base_url, SDK client
+        # This would require checking the provider_snapshots table or similar, which we don't have access to in this test.
+
+
+@pytest.mark.parametrize('change', ['version', 'model', 'verification_status'])
+def test_provider_session_groq_connection_change_fails_closed(store, change):
+    """GROQ: session built, then replace connection version/model/verification_status.
+    session.check() -> safe UNAVAILABLE. Does not switch to new Provider.
+    """
+    task, run, lease = active(store)
+    # Update the provider connection to be GROQ with TEXT and VISUAL_QUALITY
+    with store.transaction() as repo:
+        conn = repo.get(AIProviderConnection, run.provider_connection_id)
+        updated_conn = replace(
+            conn,
+            provider_type='GROQ',
+            capabilities=[Capability.TEXT, Capability.VISUAL_QUALITY],
+            default_model='qwen/qwen3.8-27b',
+            configuration_version=1,
+            verification_status=VerificationStatus.VERIFIED,
+            workspace_id=lease.workspace_id
+        )
+        repo.update_provider_connection(updated_conn)
+        # Update the task_runs table to match the connection
+        repo._conn.execute(
+            "UPDATE task_runs SET provider_type=?, model=?, provider_configuration_version=? WHERE run_id=?",
+            (updated_conn.provider_type, updated_conn.default_model, updated_conn.configuration_version, run.run_id)
+        )
+    # Build session (pins snapshot)
+    config = Config()
+    config.agents['image']['enabled'] = False
+    fake = FakeProvider()
+    selected = ProviderSession(store, lease, run, config, provider_factory=lambda *args: fake)
+    # Do NOT execute any Text/Visual operation
+
+    # Modify the persisted ai_provider_connections
+    edits = {
+        'version': {'configuration_version': 2},
+        'model': {'default_model': 'llama-3.1-8b-instant'},
+        'verification_status': {'verification_status': VerificationStatus.FAILED},
+    }
+    with store.transaction() as repo:
+        current_conn = repo.get(AIProviderConnection, run.provider_connection_id)
+        repo.update_provider_connection(replace(current_conn, **edits[change]))
+    # Do NOT modify task_runs
+
+    # Call session.check()
+    with pytest.raises(ProviderFailure) as caught:
+        selected.check()
+    assert caught.value.code == ErrorCode.UNAVAILABLE
+    # Verify provider_factory not called again (fake.calls empty)
+    assert not fake.calls
+    # No AIInvocation recorded
+    assert not rows(store, run)

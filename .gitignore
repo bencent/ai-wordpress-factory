@@ -25,3 +25,6 @@ test_bad.js
 # Local AI tool state
 /.kilo/agents/
 /.kilo/worktrees/
+
+# Local deployment profiles
+/deployment/profiles.local.json

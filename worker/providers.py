@@ -25,7 +25,7 @@ class ProviderSession:
             connection=repo.get_provider_connection(run.provider_connection_id)
         if connection is None:
             raise ProviderFailure(ErrorCode.UNAVAILABLE)
-        if connection.provider_type != 'OPENAI':
+        if connection.provider_type not in ('OPENAI', 'GROQ'):
             raise ProviderFailure(ErrorCode.UNSUPPORTED_CAPABILITY)
         if connection.verification_status == VerificationStatus.FAILED:
             raise ProviderFailure(ErrorCode.UNAVAILABLE)
@@ -59,6 +59,9 @@ class ProviderSession:
             connection=repo.get_provider_connection(self.connection.provider_connection_id)
         if connection != self.connection or connection.verification_status == VerificationStatus.FAILED:
             self.failure=ProviderFailure(ErrorCode.UNAVAILABLE)
+            raise self.failure
+        if connection.provider_type not in ('OPENAI', 'GROQ'):
+            self.failure=ProviderFailure(ErrorCode.UNSUPPORTED_CAPABILITY)
             raise self.failure
 
     def invoke(self, capability, operation, request):
