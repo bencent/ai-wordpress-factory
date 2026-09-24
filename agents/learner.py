@@ -10,8 +10,8 @@ from . import BaseAgent
 class LearnerAgent(BaseAgent):
     """學習代理人，負責分析人工校稿的修改，提取規律並產生學習提案。"""
 
-    def __init__(self, config):
-        super().__init__(config)
+    def __init__(self, config, *, providers=None):
+        super().__init__(config, providers=providers)
         self.description = "負責分析人工校稿的修改，提取規律並產生學習提案。"
 
     def analyze_review(self, task: Task) -> Dict[str, Any]:

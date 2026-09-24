@@ -2,6 +2,7 @@
 # 负责图像生成 API 抽象与 OpenAI 实现
 
 from abc import ABC, abstractmethod
+from domain.ai_runtime import RuntimeOnly, classify_error, ProviderFailure, ErrorCode
 from typing import Optional
 from contracts import ImageGenerationRequest, ImageGenerationResult
 
@@ -22,29 +23,30 @@ class ImageProvider(ABC):
         raise NotImplementedError
 
 
-class OpenAIImageProvider(ImageProvider):
+class OpenAIImageProvider(ImageProvider, RuntimeOnly):
     """OpenAI DALL-E 3 图像生成提供者。"""
 
-    def __init__(self, config):
-        self.config = config
+    def __init__(self, config, *, model=None):
+        self.__api_key = getattr(config,"openai_api_key",None)
+        self.__model = model
 
     def generate(self, request: ImageGenerationRequest) -> ImageGenerationResult:
         try:
-            import openai
+            from providers.sdk_client import create_client
 
-            api_key = getattr(self.config, "openai_api_key", None)
+            api_key = self.__api_key
             if not api_key:
                 return ImageGenerationResult(
                     task_id=request.task_id,
                     success=False,
                     provider="openai",
-                    model=request.model,
-                    error="OpenAI API Key 未配置",
+                    model=self.__model or request.model,
+                    error=ProviderFailure(ErrorCode.AUTHENTICATION).safe_summary,
                 )
 
-            client = openai.OpenAI(api_key=api_key)
+            client = create_client(api_key)
             response = client.images.generate(
-                model=request.model,
+                model=self.__model or request.model,
                 prompt=request.prompt_used or request.content_summary,
                 size=request.resolution,
                 quality=request.quality,
@@ -65,7 +67,7 @@ class OpenAIImageProvider(ImageProvider):
                 task_id=request.task_id,
                 success=True,
                 provider="openai",
-                model=request.model,
+                model=self.__model or request.model,
                 image_url=image_url,
                 content_type="image/png",
                 width=width,
@@ -77,6 +79,6 @@ class OpenAIImageProvider(ImageProvider):
                 task_id=request.task_id,
                 success=False,
                 provider="openai",
-                model=request.model,
-                error=str(e),
+                model=self.__model or request.model,
+                error=classify_error(e).safe_summary,
             )

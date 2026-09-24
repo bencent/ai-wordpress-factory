@@ -23,3 +23,7 @@ python-dateutil>=2.8.0
 
 # Browser automation for preview rendering (Phase 7D-1)
 playwright>=1.40.0
+
+# Phase 8.1 HTTP API (approved runtime versions)
+fastapi==0.137.1
+uvicorn==0.49.0

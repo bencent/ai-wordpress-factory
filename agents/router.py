@@ -10,8 +10,8 @@ from . import BaseAgent
 class Router(BaseAgent):
     """路由代理人，根據 ReviewResult 決定下一步行動。"""
 
-    def __init__(self, config):
-        super().__init__(config)
+    def __init__(self, config, *, providers=None):
+        super().__init__(config, providers=providers)
         self.description = "負責根據審閱結果決定下一步行動：發布、重寫、研究、SEO 或失敗。"
 
     def decide(self, review_result: ReviewResult, task: Task) -> str:

@@ -332,7 +332,7 @@ class TestProviderOutputValidation(unittest.TestCase):
             mock_review.return_value = parsed
             result = reviewer.review(_make_preview_artifact())
         self.assertEqual(result.action, VisualQualityAction.HUMAN_REVIEW)
-        self.assertIn("Invalid severity value: critical", result.summary)
+        self.assertIn("AI provider: INVALID_RESPONSE", result.summary)
 
     def test_missing_severity_is_validation_failure(self):
         """Missing severity is rejected instead of defaulting to INFO."""
@@ -547,9 +547,12 @@ class TestProviderFailureHandling(unittest.TestCase):
     def test_screenshot_read_failure_reaches_human_review(self):
         """Missing screenshot reaches the reviewer's HUMAN_REVIEW path."""
         self.config.openai_api_key = "test-key"
-        result = self.reviewer.review(self.preview)
+        # Explicit provider injection; never construct a real SDK client in this test.
+        self.reviewer.provider = OpenAIVisualQualityProvider(self.config)
+        with patch('providers.sdk_client.create_client', return_value=Mock()):
+            result = self.reviewer.review(self.preview)
         self.assertEqual(result.action, VisualQualityAction.HUMAN_REVIEW)
-        self.assertIn("Failed to load screenshot", result.summary)
+        self.assertIn("AI provider: UNKNOWN", result.summary)
 
     def test_serialization_compatible_result_produced(self):
         """Serialization-compatible VisualQualityResult produced."""

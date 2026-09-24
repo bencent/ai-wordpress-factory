@@ -9,8 +9,8 @@ from . import BaseAgent
 class ContentFixerAgent(BaseAgent):
     """內容修正代理人，負責修正內容中的品質問題。"""
 
-    def __init__(self, config):
-        super().__init__(config)
+    def __init__(self, config, *, providers=None):
+        super().__init__(config, providers=providers)
         self.description = "負責修正內容中的品質問題。"
 
     def fix(self, task: Task, issues: List[str]) -> str:

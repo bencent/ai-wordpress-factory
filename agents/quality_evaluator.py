@@ -10,8 +10,8 @@ from . import BaseAgent
 class QualityEvaluatorAgent(BaseAgent):
     """品質評估代理人，負責評估內容品質、發現問題並打分。"""
 
-    def __init__(self, config):
-        super().__init__(config)
+    def __init__(self, config, *, providers=None):
+        super().__init__(config, providers=providers)
         self.description = "負責評估內容品質、發現問題並打分。"
 
     def evaluate(self, task: Task) -> ReviewResult:
