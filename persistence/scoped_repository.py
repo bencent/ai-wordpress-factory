@@ -5,6 +5,7 @@ The workspace ID is required, with no default-workspace fallback in persistence.
 """
 from domain.contracts import Task, TaskRun, TaskEvent
 from domain.providers import Workspace, AIProviderConnection, Capability
+from domain.preview import StoredPreview
 from persistence.connection import PersistenceError
 
 
@@ -156,3 +157,31 @@ class SQLiteWorkspaceRepository:
             "WHERE t.workspace_id=? AND t.current_run_id=r.run_id AND r.status IN ('CLAIMED','RUNNING')",
             (self._workspace_id,)).fetchone()[0]
         return versions,heartbeat
+
+    def get_preview_by_id(self, preview_id: str) -> StoredPreview | None:
+        """Read a complete StoredPreview by preview_id, scoped to this workspace.
+
+        Returns None if preview not found or belongs to another workspace.
+        """
+        row = self._internal._conn.execute(
+            "SELECT p.* FROM preview_records p JOIN tasks t ON t.task_id=p.task_id "
+            "JOIN workspaces w ON w.workspace_id=t.workspace_id "
+            "WHERE p.preview_id=? AND t.workspace_id=? AND w.status='ACTIVE'",
+            (preview_id, self._workspace_id)).fetchone()
+        if row is None:
+            return None
+        return self._internal._build_stored_preview(preview_id)
+
+    def get_preview_by_content_version(self, content_version_id: str) -> StoredPreview | None:
+        """Read a complete StoredPreview by content_version_id, scoped to this workspace.
+
+        Returns None if no preview exists for the content version in this workspace.
+        """
+        row = self._internal._conn.execute(
+            "SELECT p.preview_id FROM preview_records p JOIN tasks t ON t.task_id=p.task_id "
+            "JOIN workspaces w ON w.workspace_id=t.workspace_id "
+            "WHERE p.content_version_id=? AND t.workspace_id=? AND w.status='ACTIVE'",
+            (content_version_id, self._workspace_id)).fetchone()
+        if row is None:
+            return None
+        return self._internal._build_stored_preview(row['preview_id'])
