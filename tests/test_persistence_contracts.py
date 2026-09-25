@@ -175,10 +175,11 @@ def test_wal_fk_timeout_and_idempotent_migration(store):
         assert conn.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'
         assert conn.execute('PRAGMA busy_timeout').fetchone()[0] == 50
         assert [r[0] for r in conn.execute(
-            'SELECT version FROM schema_migrations ORDER BY version')] == [1, 2, 3, 4]
+            'SELECT version FROM schema_migrations ORDER BY version')] == [1, 2, 3, 4, 5]
         assert {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")} == {
             'schema_migrations', 'tasks', 'task_runs', 'task_events', 'content_versions',
-            'workspaces', 'ai_provider_connections', 'ai_invocations', 'task_retry_requests'}
+            'workspaces', 'ai_provider_connections', 'ai_invocations', 'task_retry_requests',
+            'preview_records', 'preview_assets'}
 
 
 def test_transaction_rollback_all_records(store):
@@ -409,12 +410,27 @@ def test_concurrent_migrations_share_one_history(store):
             future.result(timeout=5)
     with store.factory.connection() as conn:
         assert [r[0] for r in conn.execute(
-            'SELECT version FROM schema_migrations ORDER BY version')] == [1, 2, 3, 4]
+            'SELECT version FROM schema_migrations ORDER BY version')] == [1, 2, 3, 4, 5]
 
 
-def test_migration_0004_schema_migrations_version_list(store):
-    """Fresh database after migrate() has schema_migrations versions [1, 2, 3, 4]."""
-    with store.factory.connection() as conn:
+def test_migration_0004_schema_migrations_version_list(tmp_path):
+    """Fresh database after migrate() with 0001-0004 has schema_migrations versions [1, 2, 3, 4]."""
+    import shutil
+    from persistence.connection import ConnectionFactory
+    from persistence.migration_runner import migrate
+
+    # Create tmp migrations dir with only 0001-0004
+    migrations_src = tmp_path / 'migrations_src'
+    migrations_src.mkdir()
+    for name in ('0001_initial.sql', '0002_workspace_provider.sql',
+                 '0003_retry_idempotency.sql', '0004_groq_provider.sql'):
+        shutil.copy(f'persistence/migrations/{name}', migrations_src / name)
+
+    db_path = tmp_path / 'app.sqlite3'
+    factory = ConnectionFactory(db_path, busy_timeout_ms=50)
+    migrate(factory, migrations_src)
+
+    with factory.connection() as conn:
         versions = [r[0] for r in conn.execute(
             'SELECT version FROM schema_migrations ORDER BY version')]
         assert versions == [1, 2, 3, 4]

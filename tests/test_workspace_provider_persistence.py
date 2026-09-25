@@ -53,7 +53,7 @@ def seed(store):
 def test_fresh_migration_and_idempotent_seed(store):
     migrate(store.factory)
     with store.factory.connection() as conn:
-        assert [r[0] for r in conn.execute('SELECT version FROM schema_migrations ORDER BY version')]==[1,2,3,4]
+        assert [r[0] for r in conn.execute('SELECT version FROM schema_migrations ORDER BY version')]==[1,2,3,4,5]
         rows=conn.execute("SELECT * FROM workspaces WHERE workspace_key='default'").fetchall()
         assert len(rows)==1 and UUID(rows[0]['workspace_id']).version==4
         assert rows[0]['workspace_id']==DEFAULT_WORKSPACE_ID
