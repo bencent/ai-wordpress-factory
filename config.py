@@ -40,6 +40,9 @@ class Config:
     
     # 代理人配置
     agents: dict = None
+    
+    # 預覽配置
+    preview_base_dir: str = "artifacts/previews"
 
     def __post_init__(self):
         """初始化後加載環境變量中的配置。"""
@@ -126,4 +129,5 @@ def load_config_from_file(file_path: str = "config.json") -> Config:
         frontend_max_js_size=data.get("frontend_max_js_size", 50 * 1024),
         frontend_max_total_size=data.get("frontend_max_total_size", 200 * 1024),
         agents=data.get("agents"),
+        preview_base_dir=data.get("preview_base_dir", "artifacts/previews"),
     )

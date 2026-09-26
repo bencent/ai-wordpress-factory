@@ -25,7 +25,7 @@ from contracts import (
 from main import AIWordPressFactory
 
 
-def _make_evidence(task_id: str = "task-123", preview_id: str = "preview-456") -> RenderedEvidence:
+def _make_evidence(task_id: str = "task-123", preview_id: str = "0192f0c1-2345-7abc-8def-0123456789ab") -> RenderedEvidence:
     desktop = ViewportRenderedEvidence(
         viewport_width=1440,
         viewport_height=900,
@@ -67,7 +67,7 @@ def _make_result(passed: bool, status: str, errors=None, warnings=None) -> Rende
         warnings = []
     return RenderedTechnicalResult(
         task_id="task-123",
-        preview_id="preview-456",
+        preview_id="0192f0c1-2345-7abc-8def-0123456789ab",
         attempt_number=1,
         passed=passed,
         validation_status=status,
@@ -135,7 +135,7 @@ def _make_production_result(task_id: str) -> FrontendProductionQualityResult:
     )
 
 
-def _make_preview_artifact(task_id: str = "task-123", preview_id: str = "preview-456") -> PreviewArtifact:
+def _make_preview_artifact(task_id: str = "task-123", preview_id: str = "0192f0c1-2345-7abc-8def-0123456789ab") -> PreviewArtifact:
     desktop_vp = PreviewViewport(width=1440, height=900)
     mobile_vp = PreviewViewport(width=390, height=844)
     return PreviewArtifact(
@@ -266,7 +266,7 @@ class TestRenderedTechnicalWorkflowIntegration(unittest.TestCase):
         renderer = Mock()
         failure = PreviewInfrastructureFailure(
             task_id="task-123",
-            preview_id="preview-456",
+            preview_id="0192f0c1-2345-7abc-8def-0123456789ab",
             attempt_number=1,
             error_type="browser_crash",
             message="Browser crashed",
@@ -355,7 +355,7 @@ class TestRenderedTechnicalWorkflowIntegration(unittest.TestCase):
         _, task = self._run_with(renderer_return=renderer, validator_result=validator)
 
         self.assertIsNotNone(task.rendered_technical_result)
-        self.assertEqual(task.rendered_technical_result["preview_id"], "preview-456")
+        self.assertEqual(task.rendered_technical_result["preview_id"], "0192f0c1-2345-7abc-8def-0123456789ab")
         self.assertEqual(task.rendered_technical_result["passed"], True)
 
     def test_rendered_technical_history_appended(self):
@@ -370,7 +370,7 @@ class TestRenderedTechnicalWorkflowIntegration(unittest.TestCase):
         _, task = self._run_with(renderer_return=renderer, validator_result=validator)
 
         self.assertEqual(len(task.rendered_technical_history), 1)
-        self.assertEqual(task.rendered_technical_history[0]["preview_id"], "preview-456")
+        self.assertEqual(task.rendered_technical_history[0]["preview_id"], "0192f0c1-2345-7abc-8def-0123456789ab")
 
     def test_warning_persisted_without_retry(self):
         renderer = Mock()
@@ -1134,7 +1134,7 @@ class TestRenderedTechnicalWorkflowIntegration(unittest.TestCase):
         renderer = Mock()
         failure = PreviewInfrastructureFailure(
             task_id=task_id,
-            preview_id="preview-456",
+            preview_id="0192f0c1-2345-7abc-8def-0123456789ab",
             attempt_number=1,
             error_type="browser_crash",
             message="Browser crashed",
@@ -1559,7 +1559,7 @@ class TestRenderedTechnicalWorkflowIntegration(unittest.TestCase):
         
         reloaded = workflow_state.get_task(task_id)
         self.assertIsNotNone(reloaded.rendered_technical_result)
-        self.assertEqual(reloaded.rendered_technical_result["preview_id"], "preview-456")
+        self.assertEqual(reloaded.rendered_technical_result["preview_id"], "0192f0c1-2345-7abc-8def-0123456789ab")
         self.assertEqual(reloaded.rendered_technical_result["passed"], True)
 
     def test_rendered_technical_history_survives_save_load(self):
@@ -1580,7 +1580,7 @@ class TestRenderedTechnicalWorkflowIntegration(unittest.TestCase):
         
         reloaded = workflow_state.get_task(task_id)
         self.assertEqual(len(reloaded.rendered_technical_history), 1)
-        self.assertEqual(reloaded.rendered_technical_history[0]["preview_id"], "preview-456")
+        self.assertEqual(reloaded.rendered_technical_history[0]["preview_id"], "0192f0c1-2345-7abc-8def-0123456789ab")
 
     def test_multiple_rendered_technical_history_entries_preserve_order(self):
         """Multiple rendered technical history entries preserve order"""
@@ -1939,7 +1939,7 @@ class TestVisualQualityWorkflowIntegration(unittest.TestCase):
 
     def test_infrastructure_failure_does_not_run_visual_reviewer(self):
         failure = PreviewInfrastructureFailure(
-            task_id="task-123", preview_id="preview-456", attempt_number=1,
+            task_id="task-123", preview_id="0192f0c1-2345-7abc-8def-0123456789ab", attempt_number=1,
             error_type="browser_crash", message="Browser crashed", retryable=False,
             occurred_at=datetime.datetime.now().isoformat(), failure_category=FailureCategory.INFRASTRUCTURE,
         )

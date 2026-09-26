@@ -1,5 +1,8 @@
 """Background-only Factory entry; approval and publication are separate slices."""
 from copy import deepcopy
+from hashlib import sha256
+from pathlib import Path
+import struct
 from contracts import ApprovalPolicy, ApprovalPolicyMode, ClientProfile, BrandProfile
 from config import Config
 from state import Task as LegacyTask, TaskStatus, ContentType as LegacyContentType
@@ -7,6 +10,7 @@ from main import AIWordPressFactory
 from domain.contracts import Task, TaskRun, RunMode
 from domain.execution import LeaseLost
 from domain.failures import UnsafeApprovalPolicyError, require_human_policy, check_policy_sources
+from domain.preview import PreviewRecord, PreviewAsset, PreviewAssetKind, PreviewAssetMediaType
 from service.checkpoints import checkpoint, STAGES
 from worker.safe_logging import safe_factory_logs
 from domain.observer import ObserverError
@@ -114,6 +118,76 @@ def map_task(task):
         client_profile=client.to_dict(), approval_policy=deepcopy(LEGACY_HUMAN))
 
 
+def _validate_png_metadata(data: bytes) -> tuple[int, int]:
+    """Validate PNG signature and IHDR chunk, return (width, height).
+
+    Raises:
+        ValueError: if PNG signature or IHDR chunk is invalid
+    """
+    if not data.startswith(b'\x89PNG\r\n\x1a\n'):
+        raise ValueError("Invalid PNG signature")
+    if len(data) < 24:
+        raise ValueError("PNG too small for IHDR")
+    length = struct.unpack('>I', data[8:12])[0]
+    if length != 13:
+        raise ValueError(f"IHDR chunk length {length} != 13")
+    if data[12:16] != b'IHDR':
+        raise ValueError("First chunk is not IHDR")
+    width = struct.unpack('>I', data[16:20])[0]
+    height = struct.unpack('>I', data[20:24])[0]
+    if width <= 0 or height <= 0:
+        raise ValueError("PNG dimensions must be positive")
+    return width, height
+
+
+def _build_preview_assets(
+    preview_artifact,  # PreviewArtifact from contracts
+    preview_base_dir: str,
+) -> tuple[PreviewAsset, ...]:
+    """Validate screenshots and build PreviewAsset tuple.
+
+    Args:
+        preview_artifact: PreviewArtifact with screenshot paths
+        preview_base_dir: configured preview base directory (trusted root)
+
+    Returns:
+        Tuple of 4 PreviewAsset objects in deterministic kind order.
+
+    Raises:
+        ValueError: safe message, no paths, no raw exceptions
+    """
+    trusted_root = Path(preview_base_dir).resolve()
+    assets = []
+    kind_path_pairs = [
+        (PreviewAssetKind.DESKTOP_VIEWPORT, preview_artifact.desktop_viewport_screenshot_path),
+        (PreviewAssetKind.DESKTOP_FULL_PAGE, preview_artifact.desktop_full_page_screenshot_path),
+        (PreviewAssetKind.MOBILE_VIEWPORT, preview_artifact.mobile_viewport_screenshot_path),
+        (PreviewAssetKind.MOBILE_FULL_PAGE, preview_artifact.mobile_full_page_screenshot_path),
+    ]
+    for kind, abs_path in kind_path_pairs:
+        path = Path(abs_path).resolve(strict=True)
+        if not path.is_relative_to(trusted_root):
+            raise ValueError("Screenshot outside artifact root")
+        if not path.is_file() or path.is_symlink():
+            raise ValueError("Screenshot is not a regular file")
+        data = path.read_bytes()
+        width, height = _validate_png_metadata(data)
+        sha256_hash = sha256(data).hexdigest()
+        byte_size = len(data)
+        artifact_key = "previews/" + path.relative_to(trusted_root).as_posix()
+        assets.append(PreviewAsset(
+            preview_id=preview_artifact.preview_id,
+            kind=kind,
+            artifact_key=artifact_key,
+            sha256=sha256_hash,
+            media_type=PreviewAssetMediaType.PNG,
+            width=width,
+            height=height,
+            byte_size=byte_size,
+        ))
+    return tuple(assets)
+
+
 class FactoryAdapter:
     def __init__(self, store, config_resolver, image_root, *, factory_class=BackgroundFactory,
                  image_downloader=None, provider_factory=provider_from_connection, credential_resolver=None):
@@ -184,8 +258,30 @@ class FactoryAdapter:
         check_policy_sources(legacy)
         check_policy_sources(factory.runtime_config)
         version = build_version(task, legacy, image_data)
+        # Persist preview if available
+        from contracts import PreviewArtifact
+        preview_artifact = None
+        if legacy.preview_history:
+            # Use the latest preview artifact
+            preview_artifact = PreviewArtifact.from_dict(legacy.preview_history[-1])
+        
         with self.store.transaction() as repo:
             accepted = repo.complete_content_version(lease, version,
                 observer.snapshot(legacy.to_dict()), now())
+            if not accepted:
+                raise LeaseLost()
+            
+            if preview_artifact is not None:
+                preview_base_dir = getattr(cfg, 'preview_base_dir', 'artifacts/previews')
+                record = PreviewRecord(
+                    preview_id=preview_artifact.preview_id,
+                    workspace_id=lease.workspace_id,
+                    task_id=lease.task_id,
+                    run_id=lease.run_id,
+                    content_version_id=version.content_version_id,
+                    created_at=preview_artifact.created_at,
+                )
+                assets = _build_preview_assets(preview_artifact, preview_base_dir)
+                repo.append_preview(record, assets)
         if not accepted:
             raise LeaseLost()

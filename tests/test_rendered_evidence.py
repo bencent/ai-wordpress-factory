@@ -68,7 +68,7 @@ class TestRenderedEvidenceContracts(unittest.TestCase):
         )
         evidence = RenderedEvidence(
             task_id="task-123",
-            preview_id="preview-456",
+            preview_id="0192f0c1-2345-7abc-8def-0123456789ab",
             attempt_number=1,
             desktop=desktop,
             mobile=mobile,
@@ -79,7 +79,7 @@ class TestRenderedEvidenceContracts(unittest.TestCase):
         restored = RenderedEvidence.from_dict(data)
 
         self.assertEqual(restored.task_id, "task-123")
-        self.assertEqual(restored.preview_id, "preview-456")
+        self.assertEqual(restored.preview_id, "0192f0c1-2345-7abc-8def-0123456789ab")
         self.assertEqual(restored.attempt_number, 1)
         self.assertEqual(restored.desktop.viewport_width, 1440)
         self.assertEqual(restored.desktop.viewport_height, 900)
@@ -143,7 +143,7 @@ class TestRenderedEvidenceCollection(unittest.TestCase):
 
             artifact, evidence = self.renderer._render_with_browser(
                 task_id="task-123",
-                preview_id="preview-456",
+                preview_id="0192f0c1-2345-7abc-8def-0123456789ab",
                 attempt_number=1,
                 html_path=html_path,
                 preview_dir=preview_dir,
@@ -165,7 +165,7 @@ class TestRenderedEvidenceCollection(unittest.TestCase):
 
             _, evidence = self.renderer._render_with_browser(
                 task_id="task-123",
-                preview_id="preview-456",
+                preview_id="0192f0c1-2345-7abc-8def-0123456789ab",
                 attempt_number=1,
                 html_path=html_path,
                 preview_dir=preview_dir,
@@ -186,7 +186,7 @@ class TestRenderedEvidenceCollection(unittest.TestCase):
 
             _, evidence = self.renderer._render_with_browser(
                 task_id="task-123",
-                preview_id="preview-456",
+                preview_id="0192f0c1-2345-7abc-8def-0123456789ab",
                 attempt_number=1,
                 html_path=html_path,
                 preview_dir=preview_dir,
@@ -226,7 +226,7 @@ class TestRenderedEvidenceCollection(unittest.TestCase):
 
             _, evidence = self.renderer._render_with_browser(
                 task_id="task-123",
-                preview_id="preview-456",
+                preview_id="0192f0c1-2345-7abc-8def-0123456789ab",
                 attempt_number=1,
                 html_path=html_path,
                 preview_dir=preview_dir,
@@ -268,7 +268,7 @@ class TestRenderedEvidenceCollection(unittest.TestCase):
 
             _, evidence = self.renderer._render_with_browser(
                 task_id="task-123",
-                preview_id="preview-456",
+                preview_id="0192f0c1-2345-7abc-8def-0123456789ab",
                 attempt_number=1,
                 html_path=html_path,
                 preview_dir=preview_dir,
@@ -307,7 +307,7 @@ class TestRenderedEvidenceCollection(unittest.TestCase):
 
             _, evidence = self.renderer._render_with_browser(
                 task_id="task-123",
-                preview_id="preview-456",
+                preview_id="0192f0c1-2345-7abc-8def-0123456789ab",
                 attempt_number=1,
                 html_path=html_path,
                 preview_dir=preview_dir,
@@ -346,7 +346,7 @@ class TestRenderedEvidenceCollection(unittest.TestCase):
 
             _, evidence = self.renderer._render_with_browser(
                 task_id="task-123",
-                preview_id="preview-456",
+                preview_id="0192f0c1-2345-7abc-8def-0123456789ab",
                 attempt_number=1,
                 html_path=html_path,
                 preview_dir=preview_dir,
@@ -397,7 +397,7 @@ class TestRenderedEvidenceCollection(unittest.TestCase):
 
             _, evidence = self.renderer._render_with_browser(
                 task_id="task-123",
-                preview_id="preview-456",
+                preview_id="0192f0c1-2345-7abc-8def-0123456789ab",
                 attempt_number=1,
                 html_path=html_path,
                 preview_dir=preview_dir,
@@ -453,7 +453,7 @@ class TestRenderedEvidenceCollection(unittest.TestCase):
 
             _, evidence = self.renderer._render_with_browser(
                 task_id="task-123",
-                preview_id="preview-456",
+                preview_id="0192f0c1-2345-7abc-8def-0123456789ab",
                 attempt_number=1,
                 html_path=html_path,
                 preview_dir=preview_dir,
@@ -559,7 +559,7 @@ class TestPreviewArtifactUnchanged(unittest.TestCase):
 
             artifact, evidence = self.renderer._render_with_browser(
                 task_id="task-123",
-                preview_id="preview-456",
+                preview_id="0192f0c1-2345-7abc-8def-0123456789ab",
                 attempt_number=1,
                 html_path=html_path,
                 preview_dir=preview_dir,
