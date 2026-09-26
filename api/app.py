@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException
 from fastapi.concurrency import run_in_threadpool
-from domain.submission import ValidationError,IdempotencyConflict,ProfileError,TaskNotFound
+from domain.submission import ValidationError,IdempotencyConflict,ProfileError,TaskNotFound,PreviewNotFound
 from service.task_http import RetryConflict,RetryIdempotencyConflict
 from persistence.connection import PersistenceError
 from service.http_bootstrap import build_http_service
@@ -81,6 +81,7 @@ def create_app(service=None):
         IdempotencyConflict:(409,'IDEMPOTENCY_CONFLICT','Submission key conflicts with an existing request.'),
         ProfileError:(400,'VALIDATION_ERROR','Requested resources are unavailable.'),
         TaskNotFound:(404,'TASK_NOT_FOUND','Task not found.'),
+        PreviewNotFound:(404,'PREVIEW_NOT_FOUND','Preview not found.'),
         RetryIdempotencyConflict:(409,'IDEMPOTENCY_CONFLICT','Retry key conflicts with an existing request.'),
         RetryConflict:(409,'RETRY_CONFLICT','Task cannot be retried in its current state.'),
         PersistenceError:(503,'SERVICE_UNAVAILABLE','Service is temporarily unavailable.')}
@@ -130,6 +131,10 @@ def create_app(service=None):
     async def events(request:Request,task_id:str,after_sequence:int=Query(0,ge=0,le=9223372036854775807)):
         boundary(request,('after_sequence',))
         return await run_in_threadpool(application.events,task_id,after_sequence)
+    @app.get('/api/v1/tasks/{task_id}/preview')
+    async def preview(request:Request,task_id:str):
+        boundary(request)
+        return await run_in_threadpool(application.get_preview,task_id)
     @app.post('/api/v1/tasks/{task_id}/retry')
     async def retry(request:Request,task_id:str):
         boundary(request)

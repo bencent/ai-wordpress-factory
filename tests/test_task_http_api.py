@@ -8,10 +8,12 @@ import pytest
 from fastapi.testclient import TestClient
 from api.app import create_app
 from service.task_http import TaskHTTPService
-from domain.contracts import Task,TaskRun,TaskEvent,Status
+from domain.contracts import Task,TaskRun,TaskEvent,Status,ContentType,ContentVersion
 from domain.providers import AIInvocation,Capability,InvocationStatus
+from domain.preview import PreviewRecord,PreviewAsset,PreviewAssetKind,PreviewAssetMediaType
 from persistence.connection import PersistenceError
 from worker.claiming import LeaseService
+from service.execution import now
 from test_workspace_scope import setup,body,resolver,create
 
 @pytest.fixture(autouse=True)
@@ -177,7 +179,7 @@ def test_error_envelope_unexpected_and_routes(api,caplog):
     assert err['code']=='INTERNAL_ERROR'
     assert 'raw-exception' not in response.text+caplog.text and 'credential-canary' not in response.text+caplog.text
     routes={route.path for route in create_app(service).routes}
-    assert routes=={'/','/static','/api/v1/tasks','/api/v1/tasks/{task_id}','/api/v1/tasks/{task_id}/events','/api/v1/tasks/{task_id}/retry','/api/v1/system/status','/api/v1/ui/bootstrap'}
+    assert routes=={'/','/static','/api/v1/tasks','/api/v1/tasks/{task_id}','/api/v1/tasks/{task_id}/events','/api/v1/tasks/{task_id}/preview','/api/v1/tasks/{task_id}/retry','/api/v1/system/status','/api/v1/ui/bootstrap'}
     assert 'access-control-allow-origin' not in client.get('/api/v1/system/status',headers={'Origin':'https://elsewhere.example'}).headers
 
 def test_transport_uses_only_application_service():
@@ -200,3 +202,169 @@ def test_unexpected_error_does_not_escape_to_asgi_server(api,caplog):
     assert response.status_code==500
     assert response.json()['error']['code']=='INTERNAL_ERROR'
     assert 'server-secret-canary' not in response.text+caplog.text
+
+
+def _insert_preview_for_task(store, task_id, content_version_id, run_id, workspace_id):
+    """Insert a preview record and 4 assets for the given task."""
+    preview_id = str(uuid4())
+    record = PreviewRecord(
+        preview_id=preview_id,
+        workspace_id=workspace_id,
+        task_id=task_id,
+        run_id=run_id,
+        content_version_id=content_version_id,
+        created_at=now()
+    )
+    assets = tuple(
+        PreviewAsset(
+            preview_id=preview_id,
+            kind=kind,
+            artifact_key=f'previews/{preview_id}/{kind.value}.png',
+            sha256='a' * 64,
+            media_type=PreviewAssetMediaType.PNG,
+            width=1920,
+            height=1080,
+            byte_size=102400
+        )
+        for kind in PreviewAssetKind
+    )
+    with store.transaction() as repo:
+        repo.append_preview(record, assets)
+    return preview_id
+
+
+def _complete_task_with_content_version(store, task_id, run_id, workspace_id):
+    """Create a content version and update task's latest_content_version_id."""
+    cv_id = str(uuid4())
+    cv = ContentVersion(
+        content_version_id=cv_id,
+        task_id=task_id,
+        run_id=run_id,
+        version_number=1,
+        content_type=ContentType.POST,
+        title='Test Title',
+        content='<p>Test content</p>',
+        validation_result={'passed': True},
+        created_at=now(),
+        updated_at=now(),
+        status=Status.AWAITING_APPROVAL
+    )
+    # Use unscoped transaction for ContentVersion (not supported by scoped repo)
+    with store.transaction() as repo:
+        repo.add(cv)
+        # Update task with latest_content_version_id (use internal connection directly)
+        repo._conn.execute(
+            "UPDATE tasks SET latest_content_version_id=?, updated_at=? WHERE task_id=?",
+            (cv_id, now(), task_id)
+        )
+    return cv_id
+
+
+def test_preview_get_success(api):
+    """GET /api/v1/tasks/{task_id}/preview succeeds for a persisted preview."""
+    client, service, store, a, b, pa, pb = api
+    task = create(store, a, pa)
+    # Get the run_id and create a content version
+    with store.workspace_reader(a.workspace_id) as repo:
+        run = repo.get_run(task.task_id, task.current_run_id)
+        run_id = run.run_id
+
+    cv_id = _complete_task_with_content_version(store, task.task_id, run_id, a.workspace_id)
+    _insert_preview_for_task(store, task.task_id, cv_id, run_id, a.workspace_id)
+
+    response = client.get(f'/api/v1/tasks/{task.task_id}/preview')
+    assert response.status_code == 200
+    data = response.json()
+
+    # Required top-level fields
+    assert data['preview_id'] is not None
+    assert data['task_id'] == task.task_id
+    assert data['run_id'] == run_id
+    assert data['content_version_id'] == cv_id
+    assert data['created_at'] is not None
+
+    # Assets array with exactly 4 entries
+    assets = data['assets']
+    assert len(assets) == 4
+    kinds = {a['kind'] for a in assets}
+    assert kinds == {
+        'desktop_viewport',
+        'desktop_full_page',
+        'mobile_viewport',
+        'mobile_full_page'
+    }
+
+    # Each asset has required fields
+    for asset in assets:
+        assert asset['kind'] in kinds
+        assert asset['artifact_key'].startswith('previews/')
+        assert asset['artifact_key'].endswith('.png')
+        assert asset['media_type'] == 'image/png'
+        assert isinstance(asset['width'], int) and asset['width'] > 0
+        assert isinstance(asset['height'], int) and asset['height'] > 0
+        assert isinstance(asset['byte_size'], int) and asset['byte_size'] > 0
+        assert isinstance(asset['sha256'], str) and len(asset['sha256']) == 64
+
+    # workspace_id must NOT be exposed
+    assert 'workspace_id' not in data
+    # Absolute filesystem paths / preview_base_dir must NOT be exposed
+    for asset in assets:
+        assert not asset['artifact_key'].startswith('/')
+        assert 'preview_base_dir' not in asset
+        assert 'artifacts' not in asset['artifact_key'] or asset['artifact_key'].startswith('previews/')
+
+
+def test_preview_missing_task_returns_task_not_found(api):
+    """Missing task returns 404 TASK_NOT_FOUND."""
+    client, service, store, a, b, pa, pb = api
+    response = client.get('/api/v1/tasks/missing-task-id/preview')
+    assert response.status_code == 404
+    err = response.json()['error']
+    assert err['code'] == 'TASK_NOT_FOUND'
+
+
+def test_preview_foreign_workspace_task_returns_task_not_found(api):
+    """Foreign-workspace task returns 404 TASK_NOT_FOUND (not PREVIEW_NOT_FOUND)."""
+    client, service, store, a, b, pa, pb = api
+    foreign = create(store, b, pb)  # task in workspace b
+    response = client.get(f'/api/v1/tasks/{foreign.task_id}/preview')
+    assert response.status_code == 404
+    err = response.json()['error']
+    assert err['code'] == 'TASK_NOT_FOUND'
+
+
+def test_preview_existing_task_no_preview_returns_preview_not_found(api):
+    """Existing task with no persisted preview returns 404 PREVIEW_NOT_FOUND."""
+    client, service, store, a, b, pa, pb = api
+    task = create(store, a, pa)  # task exists but no preview inserted
+    response = client.get(f'/api/v1/tasks/{task.task_id}/preview')
+    assert response.status_code == 404
+    err = response.json()['error']
+    assert err['code'] == 'PREVIEW_NOT_FOUND'
+
+
+def test_preview_asset_ordering_is_deterministic(api):
+    """Assets are returned in deterministic order (sorted by kind value)."""
+    client, service, store, a, b, pa, pb = api
+    task = create(store, a, pa)
+    with store.workspace_reader(a.workspace_id) as repo:
+        run = repo.get_run(task.task_id, task.current_run_id)
+        run_id = run.run_id
+
+    cv_id = _complete_task_with_content_version(store, task.task_id, run_id, a.workspace_id)
+    _insert_preview_for_task(store, task.task_id, cv_id, run_id, a.workspace_id)
+
+    response = client.get(f'/api/v1/tasks/{task.task_id}/preview')
+    assert response.status_code == 200
+    assets = response.json()['assets']
+
+    # PreviewAssetKind enum values sort alphabetically:
+    # desktop_full_page, desktop_viewport, mobile_full_page, mobile_viewport
+    expected_order = [
+        'desktop_full_page',
+        'desktop_viewport',
+        'mobile_full_page',
+        'mobile_viewport'
+    ]
+    actual_order = [a['kind'] for a in assets]
+    assert actual_order == expected_order

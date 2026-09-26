@@ -34,6 +34,13 @@ class TaskNotFound(LookupError):
         super().__init__("Task not found")
 
 
+class PreviewNotFound(LookupError):
+    code = "PREVIEW_NOT_FOUND"
+
+    def __init__(self):
+        super().__init__("Preview not found")
+
+
 @dataclass(frozen=True, kw_only=True)
 class SubmissionProfile:
     """Trusted, credential-free projection supplied by the composition layer.
