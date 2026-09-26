@@ -3,7 +3,9 @@
 
 from typing import Optional, Dict, Any
 from contracts import PreviewArtifact, VisualQualityResult, VisualQualityAction
-from providers import create_visual_quality_provider, VisualReviewRequest, VisualReviewResult
+from providers import VisualReviewRequest, VisualReviewResult
+from providers.visual_quality_provider import MissingVisualQualityProvider
+from domain.ai_runtime import classify_error
 from . import BaseAgent
 
 
@@ -24,10 +26,10 @@ class VisualQualityReviewer(BaseAgent):
     - 改變 ApprovalPolicy
     """
     
-    def __init__(self, config):
-        super().__init__(config)
+    def __init__(self, config, *, providers=None):
+        super().__init__(config, providers=providers)
         self.description = "視覺品質審查：根據截圖判斷視覺呈現品質 (PASS / WARN / HUMAN_REVIEW)"
-        self.provider = create_visual_quality_provider(config)
+        self.provider = self._providers.visual_quality or MissingVisualQualityProvider()
     
     def review(self, preview: PreviewArtifact) -> VisualQualityResult:
         """審查預覽截圖的視覺品質。
@@ -56,13 +58,16 @@ class VisualQualityReviewer(BaseAgent):
         )
         
         # 調用提供者
-        provider_result = self.provider.review(request)
+        try:
+            provider_result = self.provider.review(request)
+        except Exception as error:
+            raise classify_error(error) from None
         
         # 處理提供者錯誤
         if not provider_result.success:
             return VisualQualityResult(
                 action=VisualQualityAction.HUMAN_REVIEW,
-                summary=f"Visual review failed: {provider_result.error}",
+                summary="Visual review failed: " + (provider_result.error if provider_result.error in {"AI provider: " + c for c in ("AUTHENTICATION", "RATE_LIMITED", "TIMEOUT", "UNAVAILABLE", "INVALID_RESPONSE", "UNSUPPORTED_CAPABILITY", "UNKNOWN")} else "AI provider: INVALID_RESPONSE"),
                 issues=[],
                 reviewed_viewports=[],
                 reviewer="visual_quality_reviewer",

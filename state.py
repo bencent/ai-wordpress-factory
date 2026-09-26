@@ -65,11 +65,12 @@ class Task:
     research_data: Optional[List[Dict[str, Any]]] = None
     draft_content: Optional[str] = None
     critique_result: Optional[Dict[str, Any]] = None
+    quality_result: Optional[Dict[str, Any]] = None
     revised_content: Optional[str] = None
     optimized_content: Optional[str] = None
     final_content: Optional[str] = None
     
-    # Retry 保護 (Content retry)
+    # Content retries after the mandatory initial quality evaluation; excludes the initial attempt.
     retry_count: int = 0
     max_retries: int = 3
     
@@ -174,6 +175,7 @@ class Task:
             "research_data": self.research_data,
             "draft_content": self.draft_content,
             "critique_result": self.critique_result,
+            "quality_result": self.quality_result,
             "revised_content": self.revised_content,
             "optimized_content": self.optimized_content,
             "final_content": self.final_content,
@@ -245,6 +247,7 @@ class Task:
             research_data=data.get("research_data"),
             draft_content=data.get("draft_content"),
             critique_result=data.get("critique_result"),
+            quality_result=data.get("quality_result"),
             revised_content=data.get("revised_content"),
             optimized_content=data.get("optimized_content"),
             final_content=data.get("final_content"),

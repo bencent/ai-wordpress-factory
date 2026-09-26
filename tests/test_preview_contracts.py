@@ -40,12 +40,12 @@ class TestPreviewContracts(unittest.TestCase):
         """Test PreviewArtifact serialization round-trip."""
         artifact = PreviewArtifact(
             task_id="task-123",
-            preview_id="preview-456",
+            preview_id="0192f0c1-2345-7abc-8def-0123456789ab",
             attempt_number=1,
-            desktop_viewport_screenshot_path="/artifacts/previews/task-123/attempt-1/preview-456/desktop-viewport.png",
-            desktop_full_page_screenshot_path="/artifacts/previews/task-123/attempt-1/preview-456/desktop-full.png",
-            mobile_viewport_screenshot_path="/artifacts/previews/task-123/attempt-1/preview-456/mobile-viewport.png",
-            mobile_full_page_screenshot_path="/artifacts/previews/task-123/attempt-1/preview-456/mobile-full.png",
+            desktop_viewport_screenshot_path="/artifacts/previews/task-123/attempt-1/0192f0c1-2345-7abc-8def-0123456789ab/desktop-viewport.png",
+            desktop_full_page_screenshot_path="/artifacts/previews/task-123/attempt-1/0192f0c1-2345-7abc-8def-0123456789ab/desktop-full.png",
+            mobile_viewport_screenshot_path="/artifacts/previews/task-123/attempt-1/0192f0c1-2345-7abc-8def-0123456789ab/mobile-viewport.png",
+            mobile_full_page_screenshot_path="/artifacts/previews/task-123/attempt-1/0192f0c1-2345-7abc-8def-0123456789ab/mobile-full.png",
             desktop_viewport=PreviewViewport(width=1440, height=900),
             mobile_viewport=PreviewViewport(width=390, height=844),
             created_at="2024-01-01T12:00:00",
@@ -55,7 +55,7 @@ class TestPreviewContracts(unittest.TestCase):
         restored = PreviewArtifact.from_dict(data)
         
         self.assertEqual(restored.task_id, "task-123")
-        self.assertEqual(restored.preview_id, "preview-456")
+        self.assertEqual(restored.preview_id, "0192f0c1-2345-7abc-8def-0123456789ab")
         self.assertEqual(restored.attempt_number, 1)
         self.assertEqual(restored.desktop_viewport_screenshot_path, artifact.desktop_viewport_screenshot_path)
         self.assertEqual(restored.desktop_full_page_screenshot_path, artifact.desktop_full_page_screenshot_path)
@@ -71,7 +71,7 @@ class TestPreviewContracts(unittest.TestCase):
         """Test PreviewArtifact defaults for missing fields."""
         minimal_data = {
             "task_id": "task-123",
-            "preview_id": "preview-456",
+            "preview_id": "0192f0c1-2345-7abc-8def-0123456789ab",
             "attempt_number": 1,
             "desktop_viewport_screenshot_path": "/path/desktop-viewport.png",
             "desktop_full_page_screenshot_path": "/path/desktop-full.png",
@@ -89,7 +89,7 @@ class TestPreviewContracts(unittest.TestCase):
         """Test PreviewInfrastructureFailure serialization round-trip."""
         failure = PreviewInfrastructureFailure(
             task_id="task-123",
-            preview_id="preview-456",
+            preview_id="0192f0c1-2345-7abc-8def-0123456789ab",
             attempt_number=1,
             error_type="browser_launch_failed",
             message="Chromium executable not found",
@@ -102,7 +102,7 @@ class TestPreviewContracts(unittest.TestCase):
         restored = PreviewInfrastructureFailure.from_dict(data)
         
         self.assertEqual(restored.task_id, "task-123")
-        self.assertEqual(restored.preview_id, "preview-456")
+        self.assertEqual(restored.preview_id, "0192f0c1-2345-7abc-8def-0123456789ab")
         self.assertEqual(restored.attempt_number, 1)
         self.assertEqual(restored.error_type, "browser_launch_failed")
         self.assertEqual(restored.message, "Chromium executable not found")
@@ -113,7 +113,7 @@ class TestPreviewContracts(unittest.TestCase):
         """Test PreviewInfrastructureFailure with CONTENT category."""
         failure = PreviewInfrastructureFailure(
             task_id="task-123",
-            preview_id="preview-456",
+            preview_id="0192f0c1-2345-7abc-8def-0123456789ab",
             attempt_number=1,
             error_type="some_error",
             message="Some message",
@@ -166,8 +166,8 @@ class TestPreviewRenderer(unittest.TestCase):
             javascript="console.log('test');",
         )
         
-        preview_dir = self.renderer._create_preview_directory("task-123", 1, "preview-456")
-        expected = Path(self.temp_dir) / "task-123" / "attempt-1" / "preview-456"
+        preview_dir = self.renderer._create_preview_directory("task-123", 1, "0192f0c1-2345-7abc-8def-0123456789ab")
+        expected = Path(self.temp_dir) / "task-123" / "attempt-1" / "0192f0c1-2345-7abc-8def-0123456789ab"
         self.assertEqual(preview_dir, expected)
         self.assertTrue(preview_dir.exists())
 
@@ -289,7 +289,7 @@ class TestPreviewRenderer(unittest.TestCase):
             
             artifact, evidence = self.renderer._render_with_browser(
                 task_id="task-123",
-                preview_id="preview-456",
+                preview_id="0192f0c1-2345-7abc-8def-0123456789ab",
                 attempt_number=1,
                 html_path=html_path,
                 preview_dir=preview_dir,
@@ -323,7 +323,7 @@ class TestPreviewRenderer(unittest.TestCase):
             # Verify evidence was returned
             self.assertIsNotNone(evidence)
             self.assertEqual(evidence.task_id, "task-123")
-            self.assertEqual(evidence.preview_id, "preview-456")
+            self.assertEqual(evidence.preview_id, "0192f0c1-2345-7abc-8def-0123456789ab")
             self.assertEqual(evidence.attempt_number, 1)
 
     @patch('playwright.sync_api.sync_playwright')
@@ -351,7 +351,7 @@ class TestPreviewRenderer(unittest.TestCase):
             with self.assertRaises(PreviewRenderError) as cm:
                 self.renderer._render_with_browser(
                     task_id="task-123",
-                    preview_id="preview-456",
+                    preview_id="0192f0c1-2345-7abc-8def-0123456789ab",
                     attempt_number=1,
                     html_path=html_path,
                     preview_dir=preview_dir,
@@ -407,7 +407,7 @@ class TestPreviewRenderer(unittest.TestCase):
             with self.assertRaises(PreviewRenderError) as cm:
                 self.renderer._render_with_browser(
                     task_id="task-123",
-                    preview_id="preview-456",
+                    preview_id="0192f0c1-2345-7abc-8def-0123456789ab",
                     attempt_number=1,
                     html_path=html_path,
                     preview_dir=preview_dir,

@@ -4,13 +4,20 @@
 import logging
 from typing import Optional, Dict, Any
 from dataclasses import asdict
+from copy import deepcopy
+from contextlib import contextmanager
+from threading import Lock
+from domain.observer import WorkflowEvent, WorkflowObserver, NoOpObserver, ObserverError, observed_workflow
 import json
 import uuid
 import datetime
 import sys
 from pathlib import Path
 
-from config import config, load_config_from_file
+from config import Config, config, load_config_from_file
+from domain.ai_runtime import RunContext, ProviderBundle, classify_error
+from domain.agent_settings import agent_settings
+from providers.composition import legacy_provider_bundle, legacy_media_upload
 from state import (
     workflow_state,
     Task,
@@ -54,21 +61,128 @@ logger = logging.getLogger("ai_wordpress_factory")
 class AIWordPressFactory:
     """AI WordPress Factory 主類，協調所有模組的工作流程。"""
 
-    def __init__(self, config_path: Optional[str] = None):
-        """初始化工廠。
-        
-        Args:
-            config_path: 配置文件路徑（可選）。
+    def __init__(self, config_path: Optional[str] = None, *,
+                 runtime_config: Optional[Config] = None, state: Optional[WorkflowState] = None,
+                 providers: Optional[ProviderBundle] = None):
+        """Legacy CLI by default; explicit config/state selects isolated execution.
+
+        Injected values are copied so agents cannot mutate the caller or another run.
+        Use for_run() to construct a fresh single-task context for service execution.
         """
-        # 加載配置
-        if config_path:
-            global config
-            config = load_config_from_file(config_path)
+        self._isolated = runtime_config is not None or state is not None
+        self._run_lock = Lock()
+        self._observer = NoOpObserver()
+        self._observing_task = None
+        self._workflow_id = None
+        self._sequence = 0
+        if self._isolated:
+            if config_path is not None:
+                raise ValueError("Do not combine config_path with injected run context")
+            self._config = deepcopy(runtime_config if runtime_config is not None else Config())
+            self._state = deepcopy(state) if state is not None else WorkflowState()
         else:
-            from config import load_config_from_env
-            load_config_from_env()
-        
+            if config_path:
+                global config
+                config = load_config_from_file(config_path)
+            else:
+                from config import load_config_from_env
+                load_config_from_env()
+        self.providers = providers if providers is not None else legacy_provider_bundle(self.runtime_config)
+        self.run_context = None
         logger.info("AI WordPress Factory 初始化完成")
+
+    @classmethod
+    def for_run(cls, task: Task, runtime_config: Config, *, providers=None,
+                workspace_id=None, run_id=None, observer=None):
+        """Fresh context for one execution; no global state or config loader mutation."""
+        state = WorkflowState()
+        state.add_task(task)
+        factory = cls(runtime_config=runtime_config, state=state, providers=providers)
+        factory.run_context = RunContext(workspace_id or "legacy-local",task.id,run_id or str(uuid.uuid4()),
+                                         factory.state,observer or NoOpObserver(),factory.providers)
+        return factory
+
+    @property
+    def state(self):
+        return self._state if self._isolated else workflow_state
+
+    @property
+    def runtime_config(self):
+        return self._config if self._isolated else config
+
+    def _event_snapshot(self, task):
+        return deepcopy(task.to_dict())
+
+    def _workflow_error(self, error):
+        return classify_error(error).safe_summary
+
+    def _emit(self, event_type, task, stage=None):
+        if self._observing_task is None or isinstance(self._observer, NoOpObserver):
+            return
+        self._sequence += 1
+        try:
+            event = WorkflowEvent(
+                event_id=f"{self._workflow_id}:{self._sequence}",
+                workflow_id=self._workflow_id, sequence_number=self._sequence,
+                task_id=task.id, type=event_type, stage=stage,
+                created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                snapshot=self._event_snapshot(task),
+            )
+            self._observer.on_event(event)
+        except Exception:
+            raise ObserverError("Workflow observer failed") from None
+
+    @contextmanager
+    def _agent_step(self, task, name):
+        self._emit("agent_started", task, name)
+        try:
+            yield
+        except ObserverError:
+            raise
+        except Exception:
+            self._emit("agent_failed", task, name)
+            raise
+        else:
+            self._emit("agent_completed", task, name)
+            self._emit("checkpoint_produced", task, name)
+
+    def _observe_workflow(self, operation, task_id: str, observer: Optional[WorkflowObserver] = None) -> bool:
+        """Retain legacy bool results, including False when awaiting approval.
+
+        Observer errors propagate and stop execution. Checkpoints are detached
+        internal task snapshots, not public API responses or recovery guarantees.
+        """
+        if not self._run_lock.acquire(blocking=False):
+            raise RuntimeError("Factory is already running")
+        task = self.state.get_task(task_id)
+        try:
+            if task is None:
+                return False
+            self.state.set_current_task(task_id)
+            self._observer = observer if observer is not None else (self.run_context.observer if self.run_context else NoOpObserver())
+            self._observing_task = task
+            self._workflow_id = str(uuid.uuid4())
+            self._sequence = 0
+            self._emit("workflow_started", task)
+            result = operation(self, task_id)
+            self._emit("checkpoint_produced", task)
+            if task.status == TaskStatus.AWAITING_APPROVAL:
+                self._emit("awaiting_approval_reached", task)
+                self._emit("workflow_completed", task)
+            elif result:
+                self._emit("workflow_completed", task)
+            else:
+                self._emit("workflow_failed", task)
+            return result
+        except ObserverError:
+            if task is not None:
+                self.state.update_task_status(task_id, TaskStatus.FAILED_NEEDS_ATTENTION,
+                                              error_message="Workflow observer failed")
+            raise
+        finally:
+            self._observer = NoOpObserver()
+            self._observing_task = None
+            self._run_lock.release()
 
     def create_task(
         self,
@@ -96,11 +210,12 @@ class AIWordPressFactory:
             content_type=content_type,
             priority=priority,
         )
-        workflow_state.add_task(task)
+        self.state.add_task(task)
         logger.info(f"創建新任務: {title} (ID: {task_id})")
         return task_id
 
-    def run_workflow(self, task_id: str) -> bool:
+    @observed_workflow
+    def run_workflow(self, task_id: str, observer: Optional[WorkflowObserver] = None) -> bool:
         """執行工作流程。
         
         Production Workflow:
@@ -113,48 +228,52 @@ class AIWordPressFactory:
         Returns:
             bool: 工作流程是否成功完成。
         """
-        task = workflow_state.get_task(task_id)
+        task = self.state.get_task(task_id)
         if not task:
             logger.error(f"任務不存在: {task_id}")
             return False
         
         try:
             # Step 1: 規劃階段
-            workflow_state.update_task_status(task_id, TaskStatus.PLANNING)
+            self.state.update_task_status(task_id, TaskStatus.PLANNING)
             planner = self._get_agent("planner")
             if planner:
-                plan = planner.create_plan(task)
-                task.plan = plan
+                with self._agent_step(task, "planner"):
+                    plan = planner.create_plan(task)
+                    task.plan = plan
                 logger.info(f"任務 {task_id} 規劃完成")
             
             # Step 2: 調研階段
-            workflow_state.update_task_status(task_id, TaskStatus.RESEARCHING)
+            self.state.update_task_status(task_id, TaskStatus.RESEARCHING)
             research_agent = self._get_agent("research")
             if research_agent:
-                research_data = research_agent.gather_research(task)
-                task.research_data = research_data
+                with self._agent_step(task, "research"):
+                    research_data = research_agent.gather_research(task)
+                    task.research_data = research_data
                 logger.info(f"任務 {task_id} 調研完成")
             
             # Step 3: 撰寫階段
-            workflow_state.update_task_status(task_id, TaskStatus.WRITING)
+            self.state.update_task_status(task_id, TaskStatus.WRITING)
             writer = self._get_agent("writer")
             if not writer:
                 logger.error("WriterAgent 未配置")
                 return False
-            draft_content = writer.write_content(task)
-            task.draft_content = draft_content
+            with self._agent_step(task, "writer"):
+                draft_content = writer.write_content(task)
+                task.draft_content = draft_content
             logger.info(f"任務 {task_id} 撰寫完成")
             
             # Step 4: Self-Critique 階段
-            workflow_state.update_task_status(task_id, TaskStatus.CRITIQUING)
+            self.state.update_task_status(task_id, TaskStatus.CRITIQUING)
             critic = self._get_agent("critic")
             if critic:
-                critique_result = critic.critique(task, draft_content)
-                task.critique_result = asdict(critique_result)
+                with self._agent_step(task, "critic"):
+                    critique_result = critic.critique(task, draft_content)
+                    task.critique_result = asdict(critique_result)
                 logger.info(f"任務 {task_id} 自我批評完成，分數: {critique_result.score}")
                 
                 if critique_result.delete or critique_result.rewrite or critique_result.research_more:
-                    workflow_state.update_task_status(task_id, TaskStatus.REWRITING)
+                    self.state.update_task_status(task_id, TaskStatus.REWRITING)
                     revised_content = self._apply_critique(task, draft_content, critique_result)
                     task.revised_content = revised_content
                     logger.info(f"任務 {task_id} 根據批評修改完成")
@@ -165,25 +284,29 @@ class AIWordPressFactory:
                 task.revised_content = draft_content
             
             # Step 5: SEO 優化階段
-            workflow_state.update_task_status(task_id, TaskStatus.OPTIMIZING)
+            self.state.update_task_status(task_id, TaskStatus.OPTIMIZING)
             seo_agent = self._get_agent("seo")
             if seo_agent:
-                optimized_content, seo_metadata = seo_agent.optimize_content(task)
-                task.optimized_content = optimized_content
-                task.seo_title = seo_metadata.get("title")
-                task.seo_description = seo_metadata.get("description")
-                task.seo_keywords = seo_metadata.get("keywords")
+                with self._agent_step(task, "seo"):
+                    optimized_content, seo_metadata = seo_agent.optimize_content(task)
+                    task.optimized_content = optimized_content
+                    task.seo_title = seo_metadata.get("title")
+                    task.seo_description = seo_metadata.get("description")
+                    task.seo_keywords = seo_metadata.get("keywords")
                 logger.info(f"任務 {task_id} SEO 優化完成")
             
             # Step 6: Review 階段（可能進入 retry loop）
             review_passed = False
             review_result = None
             
-            while task.retry_count < task.max_retries:
-                workflow_state.update_task_status(task_id, TaskStatus.REVIEWING)
+            # Initial evaluation is mandatory; the budget counts only subsequent retries.
+            while True:
+                self.state.update_task_status(task_id, TaskStatus.REVIEWING)
                 evaluator = self._get_agent("quality_evaluator")
                 if evaluator:
-                    review_result = evaluator.evaluate(task)
+                    with self._agent_step(task, "quality_evaluator"):
+                        review_result = evaluator.evaluate(task)
+                        task.quality_result = asdict(review_result)
                     logger.info(f"任務 {task_id} 品質評估完成，分數: {review_result.score}")
                 
                 if review_result and review_result.passed:
@@ -192,50 +315,60 @@ class AIWordPressFactory:
                     logger.info(f"任務 {task_id} 審閱通過，分數: {review_result.score}")
                     break
                 
-                task.retry_count += 1
-                logger.warning(f"任務 {task_id} 審閱未通過，重試次數: {task.retry_count}/{task.max_retries}")
+                logger.warning(f"任務 {task_id} 審閱未通過，已重試次數: {task.retry_count}/{task.max_retries}")
                 
                 if task.retry_count >= task.max_retries:
                     logger.error(f"任務 {task_id} 超過最大重試次數")
-                    workflow_state.update_task_status(task_id, TaskStatus.FAILED, error_message="超過最大重試次數")
+                    self.state.update_task_status(task_id, TaskStatus.FAILED, error_message="超過最大重試次數")
                     return False
                 
                 # Router 決策
-                workflow_state.update_task_status(task_id, TaskStatus.ROUTING)
+                self.state.update_task_status(task_id, TaskStatus.ROUTING)
                 router = self._get_agent("router")
                 if router:
-                    action = router.decide(review_result, task)
+                    with self._agent_step(task, "router"):
+                        action = router.decide(review_result, task)
                     logger.info(f"任務 {task_id} Router 決策: {action}")
                     
+                    if action in ("rewrite", "research", "seo"):
+                        task.retry_count += 1
                     if action == "rewrite":
                         task.draft_content = self._rewrite_content(task, review_result)
+                        task.revised_content = task.optimized_content = task.draft_content
                         continue
                     elif action == "research":
-                        workflow_state.update_task_status(task_id, TaskStatus.RESEARCHING)
+                        self.state.update_task_status(task_id, TaskStatus.RESEARCHING)
                         research_agent = self._get_agent("research")
                         if research_agent:
-                            task.research_data = research_agent.gather_research(task)
+                            with self._agent_step(task, "research"):
+                                task.research_data = research_agent.gather_research(task)
                         task.draft_content = self._rewrite_content(task, review_result)
+                        task.revised_content = task.optimized_content = task.draft_content
                         continue
                     elif action == "seo":
-                        workflow_state.update_task_status(task_id, TaskStatus.OPTIMIZING)
+                        self.state.update_task_status(task_id, TaskStatus.OPTIMIZING)
                         seo_agent = self._get_agent("seo")
                         if seo_agent:
-                            optimized_content, _ = seo_agent.optimize_content(task)
-                            task.optimized_content = optimized_content
+                            with self._agent_step(task, "seo"):
+                                optimized_content, _ = seo_agent.optimize_content(task)
+                                task.optimized_content = optimized_content
+                                task.revised_content = optimized_content
                         continue
                     else:
                         break
+                else:
+                    break
             
             if not review_passed:
                 return False
             
             # 內容修正（審閱未通過時）
             if not review_result.passed and review_result.issues:
-                workflow_state.update_task_status(task_id, TaskStatus.REWRITING)
+                self.state.update_task_status(task_id, TaskStatus.REWRITING)
                 fixer = self._get_agent("content_fixer")
                 if fixer:
-                    task.final_content = fixer.fix(task, review_result.issues)
+                    with self._agent_step(task, "content_fixer"):
+                        task.final_content = fixer.fix(task, review_result.issues)
                     logger.info(f"任務 {task_id} 內容修正完成")
                 else:
                     task.final_content = task.revised_content or task.optimized_content or task.draft_content or ""
@@ -243,19 +376,20 @@ class AIWordPressFactory:
                 task.final_content = task.revised_content or task.optimized_content or task.draft_content or ""
             
             # 最終審核
-            workflow_state.update_task_status(task_id, TaskStatus.REVIEWING)
+            self.state.update_task_status(task_id, TaskStatus.REVIEWING)
             final_reviewer = self._get_agent("final_reviewer")
             if final_reviewer:
-                task.final_content = final_reviewer.final_review(task.final_content, task)
+                with self._agent_step(task, "final_reviewer"):
+                    task.final_content = final_reviewer.final_review(task.final_content, task)
                 logger.info(f"任務 {task_id} 最終審核完成")
             
             # Frontend Pipeline with Retry Loop
             # Step: Frontend Generation (outside retry - generates once)
-            workflow_state.update_task_status(task_id, TaskStatus.FRONTEND_GENERATING)
+            self.state.update_task_status(task_id, TaskStatus.FRONTEND_GENERATING)
             frontend_agent = self._get_agent("frontend")
             if not frontend_agent:
                 logger.error("FrontendAgent 未配置")
-                workflow_state.update_task_status(task_id, TaskStatus.FAILED, error_message="FrontendAgent not available")
+                self.state.update_task_status(task_id, TaskStatus.FAILED, error_message="FrontendAgent not available")
                 return False
             
             frontend_request = FrontendRequest(
@@ -285,12 +419,13 @@ class AIWordPressFactory:
                 "metadata": frontend_request.metadata,
             }
             
-            frontend_result = frontend_agent.generate_frontend(frontend_request)
-            task.frontend_result = asdict(frontend_result)
+            with self._agent_step(task, "frontend"):
+                frontend_result = frontend_agent.generate_frontend(frontend_request)
+                task.frontend_result = asdict(frontend_result)
             logger.info(f"任務 {task_id} 前端生成完成: success={frontend_result.success}")
             
             if not frontend_result.success:
-                workflow_state.update_task_status(task_id, TaskStatus.FAILED, error_message=f"Frontend generation failed: {frontend_result.errors}")
+                self.state.update_task_status(task_id, TaskStatus.FAILED, error_message=f"Frontend generation failed: {frontend_result.errors}")
                 return False
             
             # Frontend Pipeline Retry Loop: Security -> Conversion -> Validation
@@ -314,14 +449,15 @@ class AIWordPressFactory:
                 logger.info(f"任務 {task_id} 前端管線嘗試 {attempt}/{task.max_frontend_retries}")
                 
                 # Step: Frontend Security Gate
-                workflow_state.update_task_status(task_id, TaskStatus.FRONTEND_SECURITY_CHECK)
-                security_gate = FrontendSecurityGate(config)
-                security_result = security_gate.check(
-                    html=frontend_result.html or "",
-                    css=frontend_result.css or "",
-                    javascript=frontend_result.javascript or "",
-                )
-                task.frontend_security_result = asdict(security_result)
+                self.state.update_task_status(task_id, TaskStatus.FRONTEND_SECURITY_CHECK)
+                security_gate = FrontendSecurityGate(self.runtime_config)
+                with self._agent_step(task, "frontend_security"):
+                    security_result = security_gate.check(
+                        html=frontend_result.html or "",
+                        css=frontend_result.css or "",
+                        javascript=frontend_result.javascript or "",
+                    )
+                    task.frontend_security_result = asdict(security_result)
                 logger.info(f"任務 {task_id} 前端安全檢查完成: passed={security_result.passed}")
                 
                 if not security_result.passed:
@@ -352,16 +488,17 @@ class AIWordPressFactory:
                     # Regenerate frontend with feedback
                     frontend_result = self._regenerate_frontend_with_feedback(frontend_agent, frontend_request, feedback)
                     if not frontend_result.success:
-                        workflow_state.update_task_status(task_id, TaskStatus.FAILED, error_message=f"Frontend regeneration failed: {frontend_result.errors}")
+                        self.state.update_task_status(task_id, TaskStatus.FAILED, error_message=f"Frontend regeneration failed: {frontend_result.errors}")
                         return False
                     task.frontend_result = asdict(frontend_result)
                     continue
                 
                 # Step: GreenLight Conversion
-                workflow_state.update_task_status(task_id, TaskStatus.FRONTEND_CONVERTING)
-                converter = GreenLightConverter(config)
-                conversion_result = converter.convert(security_result.html)
-                task.frontend_conversion_result = asdict(conversion_result)
+                self.state.update_task_status(task_id, TaskStatus.FRONTEND_CONVERTING)
+                converter = GreenLightConverter(self.runtime_config)
+                with self._agent_step(task, "greenlight_conversion"):
+                    conversion_result = converter.convert(security_result.html)
+                    task.frontend_conversion_result = asdict(conversion_result)
                 logger.info(f"任務 {task_id} GreenLight 轉換完成: success={conversion_result.success}")
                 
                 if not conversion_result.success:
@@ -392,7 +529,7 @@ class AIWordPressFactory:
                     # Regenerate frontend with feedback
                     frontend_result = self._regenerate_frontend_with_feedback(frontend_agent, frontend_request, feedback)
                     if not frontend_result.success:
-                        workflow_state.update_task_status(task_id, TaskStatus.FAILED, error_message=f"Frontend regeneration failed: {frontend_result.errors}")
+                        self.state.update_task_status(task_id, TaskStatus.FAILED, error_message=f"Frontend regeneration failed: {frontend_result.errors}")
                         return False
                     task.frontend_result = asdict(frontend_result)
                     continue
@@ -402,10 +539,11 @@ class AIWordPressFactory:
                 task.frontend_result = asdict(frontend_result)
                 
                 # Step: Frontend Validation
-                workflow_state.update_task_status(task_id, TaskStatus.FRONTEND_VALIDATING)
-                validator = FrontendValidator(config)
-                validation_result = validator.validate(frontend_result)
-                task.frontend_validation_result = asdict(validation_result)
+                self.state.update_task_status(task_id, TaskStatus.FRONTEND_VALIDATING)
+                validator = FrontendValidator(self.runtime_config)
+                with self._agent_step(task, "frontend_validation"):
+                    validation_result = validator.validate(frontend_result)
+                    task.frontend_validation_result = asdict(validation_result)
                 logger.info(f"任務 {task_id} 前端驗證完成: passed={validation_result.passed}, status={validation_result.validation_status}")
                 
                 if not validation_result.passed:
@@ -436,14 +574,14 @@ class AIWordPressFactory:
                     # Regenerate frontend with feedback
                     frontend_result = self._regenerate_frontend_with_feedback(frontend_agent, frontend_request, feedback)
                     if not frontend_result.success:
-                        workflow_state.update_task_status(task_id, TaskStatus.FAILED, error_message=f"Frontend regeneration failed: {frontend_result.errors}")
+                        self.state.update_task_status(task_id, TaskStatus.FAILED, error_message=f"Frontend regeneration failed: {frontend_result.errors}")
                         return False
                     task.frontend_result = asdict(frontend_result)
                     continue
                 
                 # Step: Frontend Production Quality Gate
-                workflow_state.update_task_status(task_id, TaskStatus.FRONTEND_PRODUCTION_QUALITY_CHECK)
-                production_gate = FrontendProductionQualityGate(config)
+                self.state.update_task_status(task_id, TaskStatus.FRONTEND_PRODUCTION_QUALITY_CHECK)
+                production_gate = FrontendProductionQualityGate(self.runtime_config)
                 
                 # Resolve brand rules from client profile
                 brand_rules = None
@@ -452,15 +590,16 @@ class AIWordPressFactory:
                     if brand_profile_data.get("production_rules"):
                         brand_rules = BrandProductionRules.from_dict(brand_profile_data["production_rules"])
                 
-                production_result = production_gate.check(
-                    html=frontend_result.html or "",
-                    css=frontend_result.css or "",
-                    javascript=frontend_result.javascript or "",
-                    frontend_scope=frontend_request.frontend_scope,
-                    content_type=frontend_request.content_type.name if hasattr(frontend_request.content_type, 'name') else str(frontend_request.content_type),
-                    brand_rules=brand_rules,
-                )
-                task.frontend_production_quality_result = asdict(production_result)
+                with self._agent_step(task, "production_quality"):
+                    production_result = production_gate.check(
+                        html=frontend_result.html or "",
+                        css=frontend_result.css or "",
+                        javascript=frontend_result.javascript or "",
+                        frontend_scope=frontend_request.frontend_scope,
+                        content_type=frontend_request.content_type.name if hasattr(frontend_request.content_type, 'name') else str(frontend_request.content_type),
+                        brand_rules=brand_rules,
+                    )
+                    task.frontend_production_quality_result = asdict(production_result)
                 logger.info(f"任務 {task_id} 前端生產品質檢查完成: passed={production_result.passed}, status={production_result.validation_status}")
                 
                 if not production_result.passed:
@@ -491,7 +630,7 @@ class AIWordPressFactory:
                     # Regenerate frontend with feedback
                     frontend_result = self._regenerate_frontend_with_feedback(frontend_agent, frontend_request, feedback)
                     if not frontend_result.success:
-                        workflow_state.update_task_status(task_id, TaskStatus.FAILED, error_message=f"Frontend regeneration failed: {frontend_result.errors}")
+                        self.state.update_task_status(task_id, TaskStatus.FAILED, error_message=f"Frontend regeneration failed: {frontend_result.errors}")
                         return False
                     task.frontend_result = asdict(frontend_result)
                     continue
@@ -500,12 +639,13 @@ class AIWordPressFactory:
                 frontend_pipeline_passed = True
                 
                 # Phase 7D-5D: Prepare image artifact BEFORE preview rendering
-                workflow_state.update_task_status(task_id, TaskStatus.GENERATING_IMAGE)
-                image_artifact = self._prepare_image_artifact(task)
+                self.state.update_task_status(task_id, TaskStatus.GENERATING_IMAGE)
+                with self._agent_step(task, "image_preparation"):
+                    image_artifact = self._prepare_image_artifact(task)
                 
                 # Phase 7D-5E: Deterministic image preparation guard
                 # Explicit disabled check using existing config semantics
-                image_enabled = getattr(config, "agents", {}).get("image", {}).get("enabled", True)
+                image_enabled = getattr(self.runtime_config, "agents", {}).get("image", {}).get("enabled", True)
 
                 if not image_enabled:
                     # Intentional absence - image generation explicitly disabled
@@ -519,7 +659,7 @@ class AIWordPressFactory:
                     task.final_feedback = "Image preparation failed: image agent enabled but returned no artifact"
                     task.final_failure_category = FailureCategory.IMAGE.value
                     task.failure_timestamp = datetime.datetime.now().isoformat()
-                    workflow_state.update_task_status(
+                    self.state.update_task_status(
                         task_id,
                         TaskStatus.FAILED_NEEDS_ATTENTION,
                         error_message="Image preparation failed: no artifact produced"
@@ -535,7 +675,7 @@ class AIWordPressFactory:
                     task.final_feedback = f"Image preparation {image_artifact.status.value}. No hero image available for preview or publish."
                     task.final_failure_category = FailureCategory.IMAGE.value
                     task.failure_timestamp = datetime.datetime.now().isoformat()
-                    workflow_state.update_task_status(
+                    self.state.update_task_status(
                         task_id,
                         TaskStatus.FAILED_NEEDS_ATTENTION,
                         error_message=f"Image preparation failed: {task.final_error}"
@@ -544,18 +684,19 @@ class AIWordPressFactory:
                 # READY → continue to PreviewRenderer
 
                 # Phase 7D-1: Preview Rendering
-                workflow_state.update_task_status(task_id, TaskStatus.FRONTEND_PREVIEW_RENDERING)
-                preview_renderer = PreviewRenderer(config)
+                self.state.update_task_status(task_id, TaskStatus.FRONTEND_PREVIEW_RENDERING)
+                preview_renderer = PreviewRenderer(self.runtime_config)
                 
                 # attempt_number = frontend_retry_count + 1 (current attempt)
                 attempt_number = task.frontend_retry_count + 1
                 
-                preview_artifact, preview_failure, rendered_evidence = preview_renderer.render(
-                    task_id=task_id,
-                    frontend_result=frontend_result,
-                    attempt_number=attempt_number,
-                    image_artifact=image_artifact,
-                )
+                with self._agent_step(task, "preview"):
+                    preview_artifact, preview_failure, rendered_evidence = preview_renderer.render(
+                        task_id=task_id,
+                        frontend_result=frontend_result,
+                        attempt_number=attempt_number,
+                        image_artifact=image_artifact,
+                    )
                 
                 if preview_failure:
                     # Infrastructure failure - do NOT increment frontend_retry_count
@@ -573,7 +714,7 @@ class AIWordPressFactory:
                     )
                     task.failure_timestamp = datetime.datetime.now().isoformat()
                     
-                    workflow_state.update_task_status(
+                    self.state.update_task_status(
                         task_id,
                         TaskStatus.FAILED_NEEDS_ATTENTION,
                         error_message=f"Preview rendering failed after retries: {preview_failure.message}"
@@ -605,19 +746,21 @@ class AIWordPressFactory:
                 )
                 
                 # Phase 7D-2B: Rendered Technical Validation
-                workflow_state.update_task_status(
+                self.state.update_task_status(
                     task_id,
                     TaskStatus.FRONTEND_RENDERED_TECHNICAL_CHECK,
                 )
-                rendered_technical_validator = RenderedTechnicalValidator(config)
-                rendered_technical_result = rendered_technical_validator.validate(
-                    rendered_evidence
-                )
-                task.rendered_technical_result = rendered_technical_result.to_dict()
+                rendered_technical_validator = RenderedTechnicalValidator(self.runtime_config)
+                with self._agent_step(task, "rendered_technical"):
+                    rendered_technical_result = rendered_technical_validator.validate(
+                        rendered_evidence
+                    )
+                    task.rendered_technical_result = rendered_technical_result.to_dict()
                 task.rendered_technical_history.append(rendered_technical_result.to_dict())
 
                 if rendered_technical_result.passed:
-                    visual_quality_result = self._run_visual_quality_review(task, preview_artifact)
+                    with self._agent_step(task, "visual_quality"):
+                        visual_quality_result = self._run_visual_quality_review(task, preview_artifact)
 
                 logger.info(
 
@@ -664,7 +807,7 @@ class AIWordPressFactory:
                         frontend_agent, frontend_request, feedback
                     )
                     if not frontend_result.success:
-                        workflow_state.update_task_status(
+                        self.state.update_task_status(
                             task_id,
                             TaskStatus.FAILED,
                             error_message=f"Frontend regeneration failed: {frontend_result.errors}",
@@ -735,12 +878,15 @@ class AIWordPressFactory:
                 self.save_state()
                 return False  # Workflow paused, not failed
             
+        except ObserverError:
+            raise
         except Exception as e:
-            logger.error(f"任務 {task_id} 失敗: {str(e)}")
-            workflow_state.update_task_status(
+            safe_error = self._workflow_error(e)
+            logger.error(f"任務 {task_id} 失敗: {safe_error}")
+            self.state.update_task_status(
                 task_id, 
                 TaskStatus.FAILED, 
-                error_message=str(e)
+                error_message=safe_error
             )
             return False
 
@@ -788,11 +934,17 @@ class AIWordPressFactory:
         if not agent_class:
             return None
         
-        enabled = getattr(config, "agents", {}).get(agent_type, {}).get("enabled", True)
+        enabled = getattr(self.runtime_config, "agents", {}).get(agent_type, {}).get("enabled", True)
         if not enabled:
             return None
         
-        return agent_class(config)
+        if agent_type == "publisher":
+            return agent_class(self.runtime_config)
+        settings = agent_settings(self.runtime_config)
+        if agent_type == "image":
+            return agent_class(settings,providers=self.providers,
+                               upload_media=legacy_media_upload(self.runtime_config))
+        return agent_class(settings,providers=self.providers)
 
     def _apply_critique(self, task: Task, content: str, critique: CritiqueResult) -> str:
         """根據批評結果修改內容。
@@ -835,7 +987,8 @@ class AIWordPressFactory:
         請返回修改後的完整文章。
         """
         
-        revised = writer.call_ai(prompt, temperature=0.7, max_tokens=4000)
+        with self._agent_step(task, "writer"):
+            revised = writer.call_ai(prompt, temperature=0.7, max_tokens=4000)
         return revised.strip()
 
     def _rewrite_content(self, task: Task, review_result: ReviewResult) -> str:
@@ -866,7 +1019,8 @@ class AIWordPressFactory:
         請返回重寫後的完整文章。
         """
         
-        rewritten = writer.call_ai(prompt, temperature=0.7, max_tokens=4000)
+        with self._agent_step(task, "writer"):
+            rewritten = writer.call_ai(prompt, temperature=0.7, max_tokens=4000)
         return rewritten.strip()
 
     def _create_frontend_failure_feedback(
@@ -1095,7 +1249,12 @@ class AIWordPressFactory:
             metadata=request.metadata,
         )
         
-        return frontend_agent.generate_frontend(enhanced_request)
+        task = self.state.get_task(request.task_id)
+        if task is None:
+            return frontend_agent.generate_frontend(enhanced_request)
+        with self._agent_step(task, "frontend_retry"):
+            result = frontend_agent.generate_frontend(enhanced_request)
+        return result
 
     def _finalize_frontend_failure(self, task: Task) -> None:
         """Finalize task state after frontend retry exhaustion.
@@ -1126,7 +1285,7 @@ class AIWordPressFactory:
         task.final_failure_category = final_failure_category
         task.failure_timestamp = datetime.datetime.now().isoformat()
         
-        workflow_state.update_task_status(
+        self.state.update_task_status(
             task.id,
             TaskStatus.FAILED_NEEDS_ATTENTION,
             error_message=f"Frontend pipeline failed after {task.max_frontend_retries} retries. "
@@ -1157,15 +1316,17 @@ class AIWordPressFactory:
         task: Task,
         preview_artifact: PreviewArtifact,
     ) -> VisualQualityResult:
-        workflow_state.update_task_status(task.id, TaskStatus.FRONTEND_VISUAL_REVIEW)
+        self.state.update_task_status(task.id, TaskStatus.FRONTEND_VISUAL_REVIEW)
         try:
-            reviewer = VisualQualityReviewer(config)
+            reviewer = VisualQualityReviewer(agent_settings(self.runtime_config),providers=self.providers)
             result = reviewer.review(preview_artifact)
             result_data = result.to_dict()
+        except ObserverError:
+            raise
         except Exception as exc:
             result = VisualQualityResult(
                 action=VisualQualityAction.HUMAN_REVIEW,
-                summary=f"Visual review failed: {exc}",
+                summary=f"Visual review failed: {classify_error(exc).safe_summary}",
                 issues=[],
                 reviewed_viewports=[],
                 reviewer="visual_quality_reviewer",
@@ -1195,7 +1356,7 @@ class AIWordPressFactory:
             ImageArtifact if available/created, None if image generation disabled.
         """
         # Check if image agent is enabled
-        if not getattr(config, "agents", {}).get("image", {}).get("enabled", True):
+        if not getattr(self.runtime_config, "agents", {}).get("image", {}).get("enabled", True):
             logger.info(f"任務 {task.id} 圖片生成已禁用，跳過")
             return None
             
@@ -1203,6 +1364,8 @@ class AIWordPressFactory:
         if task.image_artifact is not None:
             try:
                 existing_artifact = ImageArtifact.from_dict(task.image_artifact)
+            except ObserverError:
+                raise
             except Exception as e:
                 # Malformed persisted artifact → treat as FAILED
                 logger.warning(f"任務 {task.id} 現有圖片 artifact 格式錯誤: {e}")
@@ -1248,6 +1411,8 @@ class AIWordPressFactory:
         # Call existing ImageAgent behavior
         try:
             media_id, media_url = image_agent.generate_hero_image(task)
+        except ObserverError:
+            raise
         except Exception as e:
             logger.warning(f"任務 {task.id} 圖片生成異常: {str(e)}")
             # Create FAILED artifact
@@ -1322,7 +1487,7 @@ class AIWordPressFactory:
         task.final_feedback = f"Image preparation failed during approval resume: {error}"
         task.final_failure_category = FailureCategory.IMAGE.value
         task.failure_timestamp = datetime.datetime.now().isoformat()
-        workflow_state.update_task_status(
+        self.state.update_task_status(
             task.id,
             TaskStatus.FAILED_NEEDS_ATTENTION,
             error_message=f"Image preparation failed: {error}",
@@ -1373,7 +1538,7 @@ class AIWordPressFactory:
         """
         import datetime
         
-        task = workflow_state.get_task(task_id)
+        task = self.state.get_task(task_id)
         if not task:
             logger.error(f"Task not found: {task_id}")
             return False
@@ -1417,7 +1582,7 @@ class AIWordPressFactory:
         Returns:
             bool: True if workflow completed successfully.
         """
-        task = workflow_state.get_task(task_id)
+        task = self.state.get_task(task_id)
         if not task:
             logger.error(f"Task not found: {task_id}")
             return False
@@ -1428,6 +1593,8 @@ class AIWordPressFactory:
             if task.image_artifact is not None:
                 try:
                     persisted_artifact = ImageArtifact.from_dict(task.image_artifact)
+                except ObserverError:
+                    raise
                 except Exception as e:
                     error = f"Malformed persisted ImageArtifact: {e}"
                     task.image_artifact = create_image_artifact(
@@ -1476,24 +1643,26 @@ class AIWordPressFactory:
                 task.image_status = "failed"
             
             # Step 9: 發布階段
-            workflow_state.update_task_status(task_id, TaskStatus.PUBLISHING)
+            self.state.update_task_status(task_id, TaskStatus.PUBLISHING)
             publisher = self._get_agent("publisher")
             if publisher:
                 featured_media_id = task.hero_image_id if task.image_status == "success" else None
-                wordpress_id, wordpress_url = publisher.publish_content(task, featured_media_id=featured_media_id)
-                task.wordpress_id = wordpress_id
-                task.wordpress_url = wordpress_url
+                with self._agent_step(task, "publisher"):
+                    wordpress_id, wordpress_url = publisher.publish_content(task, featured_media_id=featured_media_id)
+                    task.wordpress_id = wordpress_id
+                    task.wordpress_url = wordpress_url
                 logger.info(f"任務 {task_id} 發布完成: {wordpress_url}")
             
             # Step 10: 完成
-            workflow_state.update_task_status(task_id, TaskStatus.COMPLETED)
+            self.state.update_task_status(task_id, TaskStatus.COMPLETED)
             logger.info(f"任務 {task_id} 已完成")
             
             # Step 11: 學習更新（發布後執行）
-            workflow_state.update_task_status(task_id, TaskStatus.LEARNING)
+            self.state.update_task_status(task_id, TaskStatus.LEARNING)
             learner = self._get_agent("learner")
             if learner:
-                learning_result = learner.analyze_review(task)
+                with self._agent_step(task, "learner"):
+                    learning_result = learner.analyze_review(task)
                 proposals = learning_result.get("學習提案", [])
                 if proposals:
                     task.learning_proposals.extend(proposals)
@@ -1504,9 +1673,11 @@ class AIWordPressFactory:
             self.save_state()
             return True
             
+        except ObserverError:
+            raise
         except Exception as e:
             logger.error(f"任務 {task_id} 發布後流程失敗: {str(e)}")
-            workflow_state.update_task_status(
+            self.state.update_task_status(
                 task_id, 
                 TaskStatus.FAILED, 
                 error_message=str(e)
@@ -1530,7 +1701,7 @@ class AIWordPressFactory:
                 "非互動模式下無法進行人工校稿，任務停止於 MANUAL_REVIEW 階段。"
                 " 請在互動式終端運行，或配置自動發布策略（未來功能）。"
             )
-            workflow_state.update_task_status(
+            self.state.update_task_status(
                 task.id,
                 TaskStatus.FAILED_NEEDS_ATTENTION,
                 error_message="非互動模式：無人工審核可用，任務停止於 MANUAL_REVIEW"
@@ -1555,7 +1726,7 @@ class AIWordPressFactory:
             logger.error(
                 "互動模式下發生 EOF，無法獲取人工審核輸入，任務停止於 MANUAL_REVIEW 階段。"
             )
-            workflow_state.update_task_status(
+            self.state.update_task_status(
                 task.id,
                 TaskStatus.FAILED_NEEDS_ATTENTION,
                 error_message="互動模式下發生 EOF：無人工審核輸入可用，任務停止於 MANUAL_REVIEW"
@@ -1577,31 +1748,40 @@ class AIWordPressFactory:
 
         return True
 
-    def save_state(self, file_path: str = "workflow_state.json") -> None:
+    def save_state(self, file_path: Optional[str] = None) -> None:
         """保存工作流程狀態到文件。
         
         Args:
             file_path: 保存文件的路徑（默認為 "workflow_state.json"）。
         """
+        if file_path is None:
+            if self._isolated:
+                if self._observing_task is not None:
+                    self._emit("checkpoint_produced", self._observing_task)
+                return
+            file_path = "workflow_state.json"
         with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(workflow_state.to_dict(), f, ensure_ascii=False, indent=2)
+            json.dump(self.state.to_dict(), f, ensure_ascii=False, indent=2)
         logger.info(f"工作流程狀態已保存到 {file_path}")
 
-    def load_state(self, file_path: str = "workflow_state.json") -> None:
+    def load_state(self, file_path: Optional[str] = None) -> None:
         """從文件加載工作流程狀態。
         
         Args:
             file_path: 文件路徑（默認為 "workflow_state.json"）。
         """
-        global workflow_state
+        if file_path is None:
+            if self._isolated:
+                raise ValueError("Isolated runs require an explicit state file")
+            file_path = "workflow_state.json"
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             # Update existing workflow_state in place to preserve references
             loaded_state = WorkflowState.from_dict(data)
-            workflow_state.tasks = loaded_state.tasks
-            workflow_state.current_task_id = loaded_state.current_task_id
-            workflow_state.global_state = loaded_state.global_state
+            self.state.tasks = loaded_state.tasks
+            self.state.current_task_id = loaded_state.current_task_id
+            self.state.global_state = loaded_state.global_state
             logger.info(f"工作流程狀態已從 {file_path} 加載")
         except FileNotFoundError:
             logger.warning(f"文件 {file_path} 不存在，使用默認狀態")

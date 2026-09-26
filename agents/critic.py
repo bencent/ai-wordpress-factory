@@ -15,8 +15,8 @@ from . import BaseAgent
 class CriticAgent(BaseAgent):
     """批判代理人，負責自我批評、偵測 AI 寫作模式、挑戰自己的內容。"""
 
-    def __init__(self, config):
-        super().__init__(config)
+    def __init__(self, config, *, providers=None):
+        super().__init__(config, providers=providers)
         self.description = "負責自我批評、偵測 AI 寫作模式、挑戰內容的假設與品質。"
 
     def critique(self, task: Task, content: str) -> CritiqueResult:

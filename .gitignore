@@ -18,3 +18,13 @@ config.json
 debug_*.py
 test.js
 test_bad.js
+
+# Phase 8 local application database
+/data/
+
+# Local AI tool state
+/.kilo/agents/
+/.kilo/worktrees/
+
+# Local deployment profiles
+/deployment/profiles.local.json

@@ -9,8 +9,8 @@ from . import BaseAgent
 class FinalReviewerAgent(BaseAgent):
     """最終審核代理人，負責檢查內容是否違反風格規則和 AI 寫作模式。"""
 
-    def __init__(self, config):
-        super().__init__(config)
+    def __init__(self, config, *, providers=None):
+        super().__init__(config, providers=providers)
         self.description = "負責最終審核，檢查內容是否違反風格規則和 AI 寫作模式。"
 
     def final_review(self, content: str, task: Task) -> str:

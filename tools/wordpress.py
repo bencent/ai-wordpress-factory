@@ -1,7 +1,7 @@
 # AI WordPress Factory WordPress 工具
 # 提供與 WordPress REST API 交互的功能
 
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, List
 from . import BaseTool
 import requests
 import json

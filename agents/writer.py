@@ -10,8 +10,8 @@ from . import BaseAgent
 class WriterAgent(BaseAgent):
     """撰寫代理人，負責根據計劃和資料撰寫高質量的內容。"""
 
-    def __init__(self, config):
-        super().__init__(config)
+    def __init__(self, config, *, providers=None):
+        super().__init__(config, providers=providers)
         self.description = "負責根據計劃和資料撰寫高質量的內容，包括文章、頁面等。"
 
     def write_content(self, task: Task) -> str:

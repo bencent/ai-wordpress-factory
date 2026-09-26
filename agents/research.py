@@ -9,8 +9,8 @@ from . import BaseAgent
 class ResearchAgent(BaseAgent):
     """調研代理人，負責收集和整理與任務相關的資料。"""
 
-    def __init__(self, config):
-        super().__init__(config)
+    def __init__(self, config, *, providers=None):
+        super().__init__(config, providers=providers)
         self.description = "負責收集和整理與任務相關的資料，包括網路搜索、數據庫查詢等。"
 
     def gather_research(self, task: Task) -> List[Dict[str, Any]]:

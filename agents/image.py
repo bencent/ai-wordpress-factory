@@ -5,16 +5,17 @@ from typing import Optional, Dict, Any, Tuple
 from state import Task
 from contracts import ImageGenerationRequest, ImageGenerationResult
 from . import BaseAgent
-from providers.image_provider import OpenAIImageProvider
+from domain.ai_runtime import ProviderFailure, ErrorCode, classify_error
 
 
 class ImageAgent(BaseAgent):
     """圖片代理人，負責根據文章內容生成 hero banner 圖片。"""
 
-    def __init__(self, config):
-        super().__init__(config)
+    def __init__(self, config, *, providers=None, upload_media=None):
+        super().__init__(config, providers=providers)
         self.description = "負責根據文章內容生成 hero banner 圖片並上傳到 WordPress。"
-        self.provider = OpenAIImageProvider(config)
+        self.provider = self._providers.image
+        self._upload_media = upload_media
 
     def generate_hero_image(self, task: Task) -> Tuple[Optional[int], Optional[str]]:
         """為文章生成 hero banner 圖片並上傳到 WordPress 作為精選圖片。
@@ -25,12 +26,17 @@ class ImageAgent(BaseAgent):
         Returns:
             Tuple[Optional[int], Optional[str]]: 媒體 ID 和媒體 URL。
         """
+        if self.provider is None:
+            raise ProviderFailure(ErrorCode.UNSUPPORTED_CAPABILITY)
         content = task.final_content or task.optimized_content or task.draft_content or ""
         title = task.title or "文章標題"
 
         prompt = self._build_image_prompt(title, content)
         request = self._build_request(task, prompt)
-        result = self.provider.generate(request)
+        try:
+            result = self.provider.generate(request)
+        except Exception as error:
+            raise classify_error(error) from None
 
         if not result.success or not result.image_url:
             task.image_status = "failed"
@@ -124,14 +130,9 @@ class ImageAgent(BaseAgent):
         Returns:
             Tuple[Optional[int], Optional[str]]: 媒體 ID 和媒體 URL。
         """
+        if self._upload_media is None:
+            raise ProviderFailure(ErrorCode.UNAVAILABLE)
         try:
-            from tools.wordpress import WordPressPublisher
-
-            publisher = WordPressPublisher(self.config)
-            media_id, media_url = publisher.upload_media(image_url, title)
-            if media_id:
-                self.log(f"圖片上傳成功: media_id={media_id}")
-            return media_id, media_url
-        except Exception as e:
-            self.log(f"圖片上傳失敗: {str(e)}", "error")
-            return None, None
+            return self._upload_media(image_url,title)
+        except Exception:
+            raise ProviderFailure(ErrorCode.UNAVAILABLE) from None

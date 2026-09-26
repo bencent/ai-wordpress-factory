@@ -9,8 +9,8 @@ from . import BaseAgent
 class PlannerAgent(BaseAgent):
     """規劃代理人，負責創建內容生成的詳細計劃。"""
 
-    def __init__(self, config):
-        super().__init__(config)
+    def __init__(self, config, *, providers=None):
+        super().__init__(config, providers=providers)
         self.description = "負責規劃內容的生成流程，包括主題、結構、關鍵點等。"
 
     def create_plan(self, task: Task) -> Dict[str, Any]:

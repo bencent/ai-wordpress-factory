@@ -8,8 +8,8 @@ from . import BaseAgent
 class FrontendAgent(BaseAgent):
     """FrontendAgent，負責根據 FrontendRequest 生成 HTML/CSS/JavaScript。"""
 
-    def __init__(self, config):
-        super().__init__(config)
+    def __init__(self, config, *, providers=None):
+        super().__init__(config, providers=providers)
         self.description = "根據 FrontendRequest 生成前端 HTML/CSS/JavaScript 與動畫指引。"
 
     def generate_frontend(

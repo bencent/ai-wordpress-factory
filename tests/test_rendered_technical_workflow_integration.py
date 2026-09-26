@@ -25,7 +25,7 @@ from contracts import (
 from main import AIWordPressFactory
 
 
-def _make_evidence(task_id: str = "task-123", preview_id: str = "preview-456") -> RenderedEvidence:
+def _make_evidence(task_id: str = "task-123", preview_id: str = "0192f0c1-2345-7abc-8def-0123456789ab") -> RenderedEvidence:
     desktop = ViewportRenderedEvidence(
         viewport_width=1440,
         viewport_height=900,
@@ -67,7 +67,7 @@ def _make_result(passed: bool, status: str, errors=None, warnings=None) -> Rende
         warnings = []
     return RenderedTechnicalResult(
         task_id="task-123",
-        preview_id="preview-456",
+        preview_id="0192f0c1-2345-7abc-8def-0123456789ab",
         attempt_number=1,
         passed=passed,
         validation_status=status,
@@ -135,7 +135,7 @@ def _make_production_result(task_id: str) -> FrontendProductionQualityResult:
     )
 
 
-def _make_preview_artifact(task_id: str = "task-123", preview_id: str = "preview-456") -> PreviewArtifact:
+def _make_preview_artifact(task_id: str = "task-123", preview_id: str = "0192f0c1-2345-7abc-8def-0123456789ab") -> PreviewArtifact:
     desktop_vp = PreviewViewport(width=1440, height=900)
     mobile_vp = PreviewViewport(width=390, height=844)
     return PreviewArtifact(
@@ -266,7 +266,7 @@ class TestRenderedTechnicalWorkflowIntegration(unittest.TestCase):
         renderer = Mock()
         failure = PreviewInfrastructureFailure(
             task_id="task-123",
-            preview_id="preview-456",
+            preview_id="0192f0c1-2345-7abc-8def-0123456789ab",
             attempt_number=1,
             error_type="browser_crash",
             message="Browser crashed",
@@ -355,7 +355,7 @@ class TestRenderedTechnicalWorkflowIntegration(unittest.TestCase):
         _, task = self._run_with(renderer_return=renderer, validator_result=validator)
 
         self.assertIsNotNone(task.rendered_technical_result)
-        self.assertEqual(task.rendered_technical_result["preview_id"], "preview-456")
+        self.assertEqual(task.rendered_technical_result["preview_id"], "0192f0c1-2345-7abc-8def-0123456789ab")
         self.assertEqual(task.rendered_technical_result["passed"], True)
 
     def test_rendered_technical_history_appended(self):
@@ -370,7 +370,7 @@ class TestRenderedTechnicalWorkflowIntegration(unittest.TestCase):
         _, task = self._run_with(renderer_return=renderer, validator_result=validator)
 
         self.assertEqual(len(task.rendered_technical_history), 1)
-        self.assertEqual(task.rendered_technical_history[0]["preview_id"], "preview-456")
+        self.assertEqual(task.rendered_technical_history[0]["preview_id"], "0192f0c1-2345-7abc-8def-0123456789ab")
 
     def test_warning_persisted_without_retry(self):
         renderer = Mock()
@@ -1134,7 +1134,7 @@ class TestRenderedTechnicalWorkflowIntegration(unittest.TestCase):
         renderer = Mock()
         failure = PreviewInfrastructureFailure(
             task_id=task_id,
-            preview_id="preview-456",
+            preview_id="0192f0c1-2345-7abc-8def-0123456789ab",
             attempt_number=1,
             error_type="browser_crash",
             message="Browser crashed",
@@ -1559,7 +1559,7 @@ class TestRenderedTechnicalWorkflowIntegration(unittest.TestCase):
         
         reloaded = workflow_state.get_task(task_id)
         self.assertIsNotNone(reloaded.rendered_technical_result)
-        self.assertEqual(reloaded.rendered_technical_result["preview_id"], "preview-456")
+        self.assertEqual(reloaded.rendered_technical_result["preview_id"], "0192f0c1-2345-7abc-8def-0123456789ab")
         self.assertEqual(reloaded.rendered_technical_result["passed"], True)
 
     def test_rendered_technical_history_survives_save_load(self):
@@ -1580,7 +1580,7 @@ class TestRenderedTechnicalWorkflowIntegration(unittest.TestCase):
         
         reloaded = workflow_state.get_task(task_id)
         self.assertEqual(len(reloaded.rendered_technical_history), 1)
-        self.assertEqual(reloaded.rendered_technical_history[0]["preview_id"], "preview-456")
+        self.assertEqual(reloaded.rendered_technical_history[0]["preview_id"], "0192f0c1-2345-7abc-8def-0123456789ab")
 
     def test_multiple_rendered_technical_history_entries_preserve_order(self):
         """Multiple rendered technical history entries preserve order"""
@@ -1939,7 +1939,7 @@ class TestVisualQualityWorkflowIntegration(unittest.TestCase):
 
     def test_infrastructure_failure_does_not_run_visual_reviewer(self):
         failure = PreviewInfrastructureFailure(
-            task_id="task-123", preview_id="preview-456", attempt_number=1,
+            task_id="task-123", preview_id="0192f0c1-2345-7abc-8def-0123456789ab", attempt_number=1,
             error_type="browser_crash", message="Browser crashed", retryable=False,
             occurred_at=datetime.datetime.now().isoformat(), failure_category=FailureCategory.INFRASTRUCTURE,
         )
@@ -2134,15 +2134,45 @@ class TestVisualQualityWorkflowIntegration(unittest.TestCase):
 
     # FAILURE SAFETY
     def test_provider_failure_result_awaits_approval(self):
-        technical = _make_result(True, "passed")
+        from persistence.codec import encode_snapshot
+
+        raw_error = "Provider API error"
         visual_reviewer = Mock()
-        visual_reviewer.review.side_effect = Exception("Provider API error")
+        visual_reviewer.review.side_effect = Exception(raw_error)
         task = self._create_task()
         preview = _make_preview_artifact(task_id=task.id)
+        observer = Mock()
+
+        def review_step(factory, task_id):
+            with factory._agent_step(task, "visual_quality"):
+                factory._run_visual_quality_review(task, preview)
+            return False
+
         with patch("main.VisualQualityReviewer", return_value=visual_reviewer):
-            self.factory._run_visual_quality_review(task, preview)
-        self.assertEqual(task.visual_quality_result["action"], "human_review")
-        self.assertIn("Provider API error", task.visual_quality_result["summary"])
+            self.factory._observe_workflow(review_step, task.id, observer=observer)
+        result = task.visual_quality_result
+        self.assertEqual(result["action"], "human_review")
+        self.assertIn("Visual review failed", result["summary"])
+        # VisualQualityResult currently has no separate error-code field.
+        self.assertIn("UNKNOWN", result["summary"])
+        self.assertNotIn(raw_error, result["summary"])
+        self.assertNotIn(raw_error, encode_snapshot(self.factory.state.to_dict()))
+        self.assertNotIn(raw_error, encode_snapshot(task.to_dict()))
+        self.assertNotIn(raw_error, encode_snapshot(task.visual_quality_history))
+        self.assertGreater(observer.on_event.call_count, 0)
+        for call in observer.on_event.call_args_list:
+            self.assertNotIn(raw_error, encode_snapshot(vars(call.args[0])))
+
+        # The sanitized result retains existing routing, even for AUTO_PUBLISH.
+        visual = VisualQualityResult(action=VisualQualityAction.HUMAN_REVIEW,
+                                     summary=result["summary"])
+        completed, routed_task, mocks = self._run_visual_workflow(
+            _make_result(True, "passed"), visual,
+            approval_mode=ApprovalPolicyMode.AUTO_PUBLISH)
+        self.assertFalse(completed)
+        self.assertEqual(routed_task.status, TaskStatus.AWAITING_APPROVAL)
+        self.assertFalse(mocks["publisher"].publish_content.called)
+        self.assertNotIn(raw_error, encode_snapshot(routed_task.to_dict()))
 
     def test_malformed_output_result_awaits_approval(self):
         # Provider returns failure due to malformed model output => reviewer maps to HUMAN_REVIEW

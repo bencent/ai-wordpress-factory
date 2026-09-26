@@ -56,7 +56,7 @@ def make_evidence(
     desktop=None,
     mobile=None,
     task_id="task-123",
-    preview_id="preview-456",
+    preview_id="0192f0c1-2345-7abc-8def-0123456789ab",
     attempt_number=1,
 ):
     if desktop is None:
