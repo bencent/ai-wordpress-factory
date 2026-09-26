@@ -3,7 +3,7 @@ import base64,json,os
 from datetime import datetime,timezone
 from pathlib import Path
 from uuid import UUID
-from domain.submission import ValidationError,TaskNotFound,SubmissionProfile,ProfileError
+from domain.submission import ValidationError,TaskNotFound,SubmissionProfile,ProfileError,PreviewNotFound
 from domain.contracts import Status
 from domain.failures import SAFE_RUN_ERROR_CODES
 from service.query import ScopedQueryService
@@ -65,6 +65,15 @@ def event_view(event):
         'summary':{'TASK_CREATED':'任務已建立','TASK_RETRY_REQUESTED':'任務已排入重試佇列'}.get(kind,'任務狀態已更新'),
         'metadata':metadata,'created_at':event.created_at}
 
+def preview_view(stored):
+    record=stored.record
+    assets=[]
+    for a in stored.assets:
+        assets.append({'kind':a.kind.value,'artifact_key':a.artifact_key,'media_type':a.media_type.value,
+            'width':a.width,'height':a.height,'byte_size':a.byte_size,'sha256':a.sha256})
+    return {'preview_id':record.preview_id,'task_id':record.task_id,'run_id':record.run_id,
+        'content_version_id':record.content_version_id,'created_at':record.created_at,'assets':assets}
+
 class TaskHTTPService:
     def __init__(self,store,resolver,*,context_provider=default_workspace_context,clock=None):
         self.store,self.resolver,self.context_provider=store,resolver,context_provider
@@ -114,6 +123,14 @@ class TaskHTTPService:
             events=repo.public_events(task_id,after_sequence)
         return {'events':[event_view(e) for e in events],
             'last_sequence':events[-1].sequence_number if events else after_sequence}
+
+    def get_preview(self,task_id):
+        query=ScopedQueryService(self.store,self.context())
+        task=query.get_task(task_id)
+        if task.latest_content_version_id is None:
+            raise PreviewNotFound()
+        stored=query.get_preview_by_content_version(task.latest_content_version_id)
+        return preview_view(stored)
     def retry(self,task_id,idempotency_key):
         if (type(idempotency_key) is not str or not 1 <= len(idempotency_key) <= 200
                 or not idempotency_key.strip()):

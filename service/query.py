@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 from domain.contracts import Task, TaskEvent
 from domain.workspace import WorkspaceContext
-from domain.submission import TaskNotFound, ValidationError
+from domain.submission import TaskNotFound, ValidationError, PreviewNotFound
 from persistence.repository import Store
 
 
@@ -56,6 +56,13 @@ class ScopedQueryService:
         if run is None:
             raise TaskNotFound()
         return run
+
+    def get_preview_by_content_version(self, content_version_id: str):
+        with self.store.workspace_reader(self.context.workspace_id) as repo:
+            preview = repo.get_preview_by_content_version(content_version_id)
+        if preview is None:
+            raise PreviewNotFound()
+        return preview
 
 
 class QueryService(ScopedQueryService):
