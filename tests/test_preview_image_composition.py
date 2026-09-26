@@ -79,7 +79,7 @@ class TestPreviewImageComposition(unittest.TestCase):
         )
 
     def _assemble(self, artifact=None, frontend_result=None):
-        preview_dir = self.renderer._create_preview_directory("task-preview", 1, "preview-1")
+        preview_dir = self.renderer._create_preview_directory("task-preview", 1, "0192f0c1-2345-7abc-8def-0123456789ab")
         html_path = self.renderer._assemble_preview_html(
             frontend_result or self._frontend(),
             preview_dir,
@@ -126,7 +126,7 @@ class TestPreviewImageComposition(unittest.TestCase):
         signature = inspect.signature(self.renderer.render)
         self.assertEqual(signature.parameters["image_artifact"].default, None)
         with patch.object(self.renderer, "_render_with_browser", return_value=(Mock(), Mock())) as render_browser:
-            self.renderer.render("task-preview", self._frontend(), 1, "preview-1")
+            self.renderer.render("task-preview", self._frontend(), 1, "0192f0c1-2345-7abc-8def-0123456789ab")
         self.assertEqual(render_browser.call_count, 1)
 
     @patch("playwright.sync_api.sync_playwright")
@@ -138,7 +138,7 @@ class TestPreviewImageComposition(unittest.TestCase):
             html_path = self.renderer._assemble_preview_html(frontend_result, preview_dir)
             artifact, evidence = self.renderer._render_with_browser(
                 task_id="task-preview",
-                preview_id="preview-1",
+                preview_id="0192f0c1-2345-7abc-8def-0123456789ab",
                 attempt_number=1,
                 html_path=html_path,
                 preview_dir=preview_dir,
@@ -306,12 +306,12 @@ class TestPreviewImageComposition(unittest.TestCase):
         }
         with patch("playwright.sync_api.sync_playwright") as mock_sync_playwright:
             self._mock_playwright(mock_sync_playwright, evaluate_return)
-            preview_dir = self.renderer._create_preview_directory("task-preview", 1, "preview-1")
+            preview_dir = self.renderer._create_preview_directory("task-preview", 1, "0192f0c1-2345-7abc-8def-0123456789ab")
             html_path = self.renderer._assemble_preview_html(
                 self._frontend(), preview_dir, self._artifact(local_path=str(image_path))
             )
             _, evidence = self.renderer._render_with_browser(
-                "task-preview", "preview-1", 1, html_path, preview_dir
+                "task-preview", "0192f0c1-2345-7abc-8def-0123456789ab", 1, html_path, preview_dir
             )
         self.assertEqual(evidence.desktop.image_load_states[0]["src"], source)
 
@@ -327,12 +327,12 @@ class TestPreviewImageComposition(unittest.TestCase):
         }
         with patch("playwright.sync_api.sync_playwright") as mock_sync_playwright:
             self._mock_playwright(mock_sync_playwright, evaluate_return)
-            preview_dir = self.renderer._create_preview_directory("task-preview", 1, "preview-1")
+            preview_dir = self.renderer._create_preview_directory("task-preview", 1, "0192f0c1-2345-7abc-8def-0123456789ab")
             html_path = self.renderer._assemble_preview_html(
                 self._frontend(), preview_dir, self._artifact(local_path=str(image_path))
             )
             _, evidence = self.renderer._render_with_browser(
-                "task-preview", "preview-1", 1, html_path, preview_dir
+                "task-preview", "0192f0c1-2345-7abc-8def-0123456789ab", 1, html_path, preview_dir
             )
         state = evidence.mobile.image_load_states[0]
         self.assertEqual(state["natural_width"], 1)
@@ -350,12 +350,12 @@ class TestPreviewImageComposition(unittest.TestCase):
         }
         with patch("playwright.sync_api.sync_playwright") as mock_sync_playwright:
             self._mock_playwright(mock_sync_playwright, evaluate_return)
-            preview_dir = self.renderer._create_preview_directory("task-preview", 1, "preview-1")
+            preview_dir = self.renderer._create_preview_directory("task-preview", 1, "0192f0c1-2345-7abc-8def-0123456789ab")
             html_path = self.renderer._assemble_preview_html(
                 self._frontend(), preview_dir, self._artifact(source_url=missing_source)
             )
             _, evidence = self.renderer._render_with_browser(
-                "task-preview", "preview-1", 1, html_path, preview_dir
+                "task-preview", "0192f0c1-2345-7abc-8def-0123456789ab", 1, html_path, preview_dir
             )
         self.assertTrue(evidence.desktop.image_load_states[0]["complete"])
         self.assertEqual(evidence.desktop.image_load_states[0]["natural_width"], 0)
@@ -375,7 +375,7 @@ class TestPreviewImageComposition(unittest.TestCase):
         )
         evidence = RenderedEvidence(
             task_id="task-preview",
-            preview_id="preview-1",
+            preview_id="0192f0c1-2345-7abc-8def-0123456789ab",
             attempt_number=1,
             desktop=viewport,
             mobile=viewport,
@@ -415,11 +415,11 @@ class TestPreviewImageComposition(unittest.TestCase):
                 self._frontend(),
                 1,
                 config=self.config,
-                preview_id="preview-1",
+                preview_id="0192f0c1-2345-7abc-8def-0123456789ab",
                 image_artifact=artifact,
             )
         renderer_class.return_value.render.assert_called_once_with(
-            "task-preview", self._frontend(), 1, "preview-1", artifact
+            "task-preview", self._frontend(), 1, "0192f0c1-2345-7abc-8def-0123456789ab", artifact
         )
 
     def test_workflow_ordering_remains_unchanged(self):

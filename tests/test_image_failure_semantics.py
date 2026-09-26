@@ -3,7 +3,9 @@
 
 import unittest
 from contextlib import ExitStack
-from datetime import datetime
+from datetime import datetime, timezone
+import base64
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from contracts import (
@@ -33,6 +35,14 @@ from contracts import (
 from main import AIWordPressFactory
 from state import Task, TaskStatus, ContentType, workflow_state
 from tools.preview_renderer import PreviewRenderer, PreviewRenderError
+
+
+import base64
+
+PNG_1X1 = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl"
+    "0n9EAAAAASUVORK5CYII="
+)
 
 
 class TestImageFailureSemantics(unittest.TestCase):
@@ -131,14 +141,14 @@ class TestImageFailureSemantics(unittest.TestCase):
     def _technical_result(self, task_id, passed=True, attempt_number=1):
         return RenderedTechnicalResult(
             task_id=task_id,
-            preview_id="preview-test",
+            preview_id="0192f0c1-2345-7abc-8def-0123456789ab",
             attempt_number=attempt_number,
             passed=passed,
             validation_status="passed" if passed else "failed",
             errors=[] if passed else [{"code": "rendered_error"}],
             warnings=[],
             diagnostics={},
-            created_at=datetime.now().isoformat(),
+            created_at=datetime.now(timezone.utc).isoformat(),
         )
 
     def _evidence(self, task_id):
@@ -156,26 +166,43 @@ class TestImageFailureSemantics(unittest.TestCase):
         )
         return RenderedEvidence(
             task_id=task_id,
-            preview_id="preview-test",
+            preview_id="0192f0c1-2345-7abc-8def-0123456789ab",
             attempt_number=1,
             desktop=viewport,
             mobile=viewport,
-            created_at=datetime.now().isoformat(),
+            created_at=datetime.now(timezone.utc).isoformat(),
         )
 
-    def _preview_artifact(self, task_id):
+    def _preview_artifact(self, task_id, attempt_number=1, preview_id=None):
+        if preview_id is None:
+            preview_id = "0192f0c1-2345-7abc-8def-0123456789ab"
         viewport = PreviewViewport(width=1440, height=900)
+        # Create preview directory structure and actual PNG files
+        preview_base = Path("artifacts/previews")
+        preview_dir = preview_base / task_id / f"attempt-{attempt_number}" / preview_id
+        preview_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create 4 PNG files
+        paths = {
+            'desktop_viewport_screenshot_path': preview_dir / "desktop-viewport.png",
+            'desktop_full_page_screenshot_path': preview_dir / "desktop-full.png",
+            'mobile_viewport_screenshot_path': preview_dir / "mobile-viewport.png",
+            'mobile_full_page_screenshot_path': preview_dir / "mobile-full.png",
+        }
+        for path in paths.values():
+            path.write_bytes(PNG_1X1)
+        
         return PreviewArtifact(
             task_id=task_id,
-            preview_id="preview-test",
-            attempt_number=1,
-            desktop_viewport_screenshot_path="artifacts/desktop.png",
-            desktop_full_page_screenshot_path="artifacts/desktop-full.png",
-            mobile_viewport_screenshot_path="artifacts/mobile.png",
-            mobile_full_page_screenshot_path="artifacts/mobile-full.png",
+            preview_id=preview_id,
+            attempt_number=attempt_number,
+            desktop_viewport_screenshot_path=str(paths['desktop_viewport_screenshot_path']),
+            desktop_full_page_screenshot_path=str(paths['desktop_full_page_screenshot_path']),
+            mobile_viewport_screenshot_path=str(paths['mobile_viewport_screenshot_path']),
+            mobile_full_page_screenshot_path=str(paths['mobile_full_page_screenshot_path']),
             desktop_viewport=viewport,
             mobile_viewport=viewport,
-            created_at=datetime.now().isoformat(),
+            created_at=datetime.now(timezone.utc).isoformat(),
         )
 
     def _install_frontend_mocks(self, stack, task, *, technical_results=None, renderer=None, visual_action=VisualQualityAction.PASS):
@@ -734,12 +761,12 @@ class TestImageFailureSemantics(unittest.TestCase):
         self.assertEqual(FailureCategory.IMAGE.value, "image")
         failure = PreviewInfrastructureFailure(
             task_id="task-image-category",
-            preview_id="preview-image-category",
+            preview_id="0192f0c1-2345-7abc-8def-0123456789ab",
             attempt_number=1,
             error_type="unexpected_error",
             message="image category round trip",
             retryable=False,
-            occurred_at=datetime.now().isoformat(),
+            occurred_at=datetime.now(timezone.utc).isoformat(),
             failure_category=FailureCategory.IMAGE,
         )
         restored_failure = PreviewInfrastructureFailure.from_dict(failure.to_dict())

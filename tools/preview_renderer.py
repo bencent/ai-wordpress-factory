@@ -106,7 +106,7 @@ class PreviewRenderer(BaseTool):
             On failure, RenderedEvidence is None.
         """
         if preview_id is None:
-            preview_id = str(uuid.uuid4())[:8]
+            preview_id = str(uuid.uuid4())
             
         # Create task-scoped preview directory
         preview_dir = self._create_preview_directory(task_id, attempt_number, preview_id)
@@ -446,7 +446,7 @@ class PreviewRenderer(BaseTool):
             mobile_full_page_screenshot_path=str(mobile_full_path),
             desktop_viewport=PreviewViewport(width=self.DESKTOP_WIDTH, height=self.DESKTOP_HEIGHT),
             mobile_viewport=PreviewViewport(width=self.MOBILE_WIDTH, height=self.MOBILE_HEIGHT),
-            created_at=datetime.datetime.now().isoformat(),
+            created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
             image_artifact_id=image_artifact_id,
         )
         
