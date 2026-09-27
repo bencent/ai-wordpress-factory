@@ -3,12 +3,14 @@ import base64,json,os
 from datetime import datetime,timezone
 from pathlib import Path
 from uuid import UUID
-from domain.submission import ValidationError,TaskNotFound,SubmissionProfile,ProfileError,PreviewNotFound
+from domain.submission import ValidationError,TaskNotFound,SubmissionProfile,ProfileError,PreviewNotFound,PreviewAssetUnavailable
 from domain.contracts import Status
 from domain.failures import SAFE_RUN_ERROR_CODES
+from domain.preview import PreviewAssetKind
 from service.query import ScopedQueryService
 from service.submission import ScopedTaskSubmissionService
 from service.workspace_bootstrap import default_workspace_context
+from service.preview_artifact import deliver_preview_asset
 
 UI_CONTENT_TYPES=['POST','PAGE']
 UI_PAGE_PURPOSES=['ABOUT','SERVICE','EVENT','OTHER']
@@ -75,9 +77,10 @@ def preview_view(stored):
         'content_version_id':record.content_version_id,'created_at':record.created_at,'assets':assets}
 
 class TaskHTTPService:
-    def __init__(self,store,resolver,*,context_provider=default_workspace_context,clock=None):
+    def __init__(self,store,resolver,*,context_provider=default_workspace_context,clock=None,preview_base_dir="artifacts/previews"):
         self.store,self.resolver,self.context_provider=store,resolver,context_provider
         self.clock=clock or (lambda:datetime.now(timezone.utc))
+        self.preview_base_dir=preview_base_dir
 
     def bootstrap(self):
         context=self.context_provider(self.store)
@@ -131,6 +134,18 @@ class TaskHTTPService:
             raise PreviewNotFound()
         stored=query.get_preview_by_content_version(task.latest_content_version_id)
         return preview_view(stored)
+
+    def get_preview_asset(self,task_id: str, kind: str) -> bytes:
+        query=ScopedQueryService(self.store,self.context())
+        task=query.get_task(task_id)
+        if task.latest_content_version_id is None:
+            raise PreviewNotFound()
+        stored=query.get_preview_by_content_version(task.latest_content_version_id)
+        try:
+            asset_kind = PreviewAssetKind(kind)
+        except ValueError:
+            raise ValidationError('kind')
+        return deliver_preview_asset(stored, asset_kind, self.preview_base_dir)
     def retry(self,task_id,idempotency_key):
         if (type(idempotency_key) is not str or not 1 <= len(idempotency_key) <= 200
                 or not idempotency_key.strip()):

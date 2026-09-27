@@ -5,6 +5,7 @@ from domain.submission import SubmissionProfile,ProfileError
 from persistence.connection import ConnectionFactory
 from persistence.repository import SQLiteStore
 from service.task_http import TaskHTTPService
+from config import config
 
 def build_http_service():
     store=SQLiteStore(ConnectionFactory(os.environ.get('AIWF_DATABASE','data/aiwf.sqlite3')))
@@ -20,4 +21,4 @@ def build_http_service():
                     brand_profile_id=brand_id,client_profile_id=row.get('client_profile_id'),
                     provider_connection_id=row['provider_connection_id'],snapshot=row.get('snapshot',{}))
         raise ProfileError()
-    return TaskHTTPService(store,resolve)
+    return TaskHTTPService(store,resolve,preview_base_dir=config.preview_base_dir)

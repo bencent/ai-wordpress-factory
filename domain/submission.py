@@ -41,6 +41,14 @@ class PreviewNotFound(LookupError):
         super().__init__("Preview not found")
 
 
+class PreviewAssetUnavailable(Exception):
+    code = "PREVIEW_ASSET_UNAVAILABLE"
+
+    def __init__(self, message: str = "Preview asset is temporarily unavailable."):
+        self.message = message
+        super().__init__(message)
+
+
 @dataclass(frozen=True, kw_only=True)
 class SubmissionProfile:
     """Trusted, credential-free projection supplied by the composition layer.
