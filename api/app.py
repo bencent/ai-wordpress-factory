@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException
 from fastapi.concurrency import run_in_threadpool
-from domain.submission import ValidationError,IdempotencyConflict,ProfileError,TaskNotFound,PreviewNotFound
+from domain.submission import ValidationError,IdempotencyConflict,ProfileError,TaskNotFound,PreviewNotFound,PreviewAssetUnavailable
 from service.task_http import RetryConflict,RetryIdempotencyConflict
 from persistence.connection import PersistenceError
 from service.http_bootstrap import build_http_service
@@ -82,6 +82,7 @@ def create_app(service=None):
         ProfileError:(400,'VALIDATION_ERROR','Requested resources are unavailable.'),
         TaskNotFound:(404,'TASK_NOT_FOUND','Task not found.'),
         PreviewNotFound:(404,'PREVIEW_NOT_FOUND','Preview not found.'),
+        PreviewAssetUnavailable:(503,'PREVIEW_ASSET_UNAVAILABLE','Preview asset is temporarily unavailable.'),
         RetryIdempotencyConflict:(409,'IDEMPOTENCY_CONFLICT','Retry key conflicts with an existing request.'),
         RetryConflict:(409,'RETRY_CONFLICT','Task cannot be retried in its current state.'),
         PersistenceError:(503,'SERVICE_UNAVAILABLE','Service is temporarily unavailable.')}
@@ -135,6 +136,12 @@ def create_app(service=None):
     async def preview(request:Request,task_id:str):
         boundary(request)
         return await run_in_threadpool(application.get_preview,task_id)
+    @app.get('/api/v1/tasks/{task_id}/preview/assets/{kind}')
+    async def preview_asset(request:Request,task_id:str,kind:str):
+        boundary(request)
+        data = await run_in_threadpool(application.get_preview_asset,task_id,kind)
+        from fastapi.responses import Response
+        return Response(content=data, media_type='image/png', headers={'Cache-Control': 'private, no-store'})
     @app.post('/api/v1/tasks/{task_id}/retry')
     async def retry(request:Request,task_id:str):
         boundary(request)
