@@ -30,6 +30,9 @@ class Repository(Protocol):
     def delete_provider_connection(self, provider_connection_id: str) -> None: ...
     def record_workflow_event(self, lease, event, snapshot, now) -> bool: ...
     def complete_content_version(self, lease, version, snapshot, now) -> bool: ...
+    def approve_content_version(self, workspace_id: str, task_id: str, content_version_id: str, now: str) -> tuple[bool, str | None]: ...
+    def find_approval_request(self, workspace_id: str, idempotency_key: str) -> tuple[str, str] | None: ...
+    def record_approval_request(self, workspace_id: str, task_id: str, idempotency_key: str, content_version_id: str, now: str) -> None: ...
     def claim_next_run(self, owner_id: str, now: str) -> RunLease | None: ...
     def start_run(self, lease: RunLease, now: str) -> bool: ...
     def heartbeat_run(self, lease: RunLease, now: str) -> bool: ...
@@ -44,7 +47,6 @@ class Repository(Protocol):
     def update_run_snapshot(self, run_id: str, *, owner_id: str | None, fencing_token: int,
                             expected_status: Status, status: Status, updated_at: str,
                             workflow_state: dict | None, error: dict | None = None) -> bool: ...
-    def events(self, task_id: str, *, after_sequence: int = 0, limit: int = 100) -> list[TaskEvent]: ...
     def update_task(self, task_id: str, *, expected_status: Status, status: Status,
                     updated_at: str, current_run_id=None, latest_content_version_id=None) -> bool: ...
     def append_preview(self, record: PreviewRecord, assets: tuple[PreviewAsset, ...]) -> None: ...
@@ -324,6 +326,25 @@ class SQLiteInternalRepository(ProviderRepositoryMixin, ExecutionRepositoryMixin
         if row is None:
             return None
         return self._build_stored_preview(row['preview_id'])
+
+    def find_approval_request(self, workspace_id: str, idempotency_key: str) -> tuple[str, str] | None:
+        """Find an existing approval request by idempotency key.
+
+        Returns (task_id, content_version_id) if found, None otherwise.
+        """
+        row = self._conn.execute(
+            "SELECT task_id, content_version_id FROM task_approval_requests "
+            "WHERE workspace_id=? AND idempotency_key=?",
+            (workspace_id, idempotency_key)).fetchone()
+        return None if row is None else (row['task_id'], row['content_version_id'])
+
+    def record_approval_request(self, workspace_id: str, task_id: str, idempotency_key: str, content_version_id: str, now: str) -> None:
+        """Record an approval request for idempotency."""
+        self._write()
+        self._conn.execute(
+            'INSERT INTO task_approval_requests '
+            '(workspace_id,task_id,idempotency_key,content_version_id,created_at) VALUES (?,?,?,?,?)',
+            (workspace_id, task_id, idempotency_key, content_version_id, now))
 
 
 # Backwards-compatible internal name for existing Worker and persistence tests.

@@ -76,3 +76,84 @@ class ExecutionRepositoryMixin:
         self._run_event(completed, 'RUN_COMPLETED', now, summary='內容產生流程已完成')
         self._run_event(completed, 'TASK_AWAITING_APPROVAL', now, summary='內容已完成，等待人工審核')
         return True
+
+    def approve_content_version(self, workspace_id, task_id, content_version_id, now):
+        """Atomically approve the exact persisted ContentVersion that was previewed.
+
+        Performs in a single transaction:
+        1. Verify Task exists in workspace and status == AWAITING_APPROVAL
+        2. Verify Task.latest_content_version_id == requested content_version_id
+        3. Verify ContentVersion belongs to this Task/workspace
+        4. Verify persisted PreviewRecord exists for this ContentVersion/Task
+        5. CAS transition: AWAITING_APPROVAL -> APPROVED
+        6. Append exactly one TASK_APPROVED TaskEvent
+        """
+        self._write()
+
+        # 1. Verify Task exists in workspace and status == AWAITING_APPROVAL
+        task_row = self._conn.execute(
+            "SELECT t.* FROM tasks t JOIN workspaces w ON w.workspace_id=t.workspace_id "
+            "WHERE t.workspace_id=? AND t.task_id=? AND w.status='ACTIVE'",
+            (workspace_id, task_id)).fetchone()
+        if task_row is None:
+            return False, 'TASK_NOT_FOUND'
+        task = self._decode(Task, task_row)
+        if task.status != Status.AWAITING_APPROVAL:
+            return False, 'WRONG_TASK_STATE'
+
+        # 2. Verify Task.latest_content_version_id == requested content_version_id
+        if task.latest_content_version_id != content_version_id:
+            return False, 'VERSION_MISMATCH'
+
+        # 3. Verify ContentVersion belongs to this Task/workspace and is AWAITING_APPROVAL
+        cv_row = self._conn.execute(
+            "SELECT cv.* FROM content_versions cv JOIN tasks t ON t.task_id=cv.task_id "
+            "JOIN workspaces w ON w.workspace_id=t.workspace_id "
+            "WHERE cv.content_version_id=? AND t.workspace_id=? AND w.status='ACTIVE'",
+            (content_version_id, workspace_id)).fetchone()
+        if cv_row is None:
+            return False, 'VERSION_NOT_FOUND'
+        cv = self._decode(ContentVersion, cv_row)
+        if cv.task_id != task_id or cv.status != Status.AWAITING_APPROVAL:
+            return False, 'VERSION_MISMATCH'
+
+        # 4. Verify persisted PreviewRecord exists for this ContentVersion/Task
+        preview_row = self._conn.execute(
+            "SELECT p.* FROM preview_records p JOIN tasks t ON t.task_id=p.task_id "
+            "JOIN workspaces w ON w.workspace_id=t.workspace_id "
+            "WHERE p.content_version_id=? AND t.workspace_id=? AND w.status='ACTIVE'",
+            (content_version_id, workspace_id)).fetchone()
+        if preview_row is None:
+            return False, 'PREVIEW_NOT_FOUND'
+
+        # 5. CAS transition: AWAITING_APPROVAL -> APPROVED
+        changed = self._conn.execute(
+            "UPDATE tasks SET status='APPROVED', updated_at=? "
+            "WHERE task_id=? AND status='AWAITING_APPROVAL' AND latest_content_version_id=?",
+            (now, task_id, content_version_id)).rowcount
+        if changed != 1:
+            return False, 'WRONG_TASK_STATE'
+
+        # 6. Append exactly one TASK_APPROVED TaskEvent
+        from uuid import uuid4
+        from domain.contracts import TaskEvent
+        event_id = str(uuid4())
+        sequence = self._conn.execute(
+            'SELECT COALESCE(MAX(sequence_number),0)+1 FROM task_events WHERE task_id=?', (task_id,)).fetchone()[0]
+        event = TaskEvent(
+            event_id=event_id,
+            event_key=f'approved:{task_id}:{content_version_id}',
+            task_id=task_id,
+            run_id=cv.run_id,
+            attempt=cv.version_number,
+            sequence_number=sequence,
+            type='TASK_APPROVED',
+            actor='system',
+            status=Status.APPROVED,
+            summary='內容已通過審核',
+            created_at=now,
+            metadata={'content_version_id': content_version_id}
+        )
+        self.add(event)
+
+        return True, None

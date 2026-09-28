@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException
 from fastapi.concurrency import run_in_threadpool
-from domain.submission import ValidationError,IdempotencyConflict,ProfileError,TaskNotFound,PreviewNotFound,PreviewAssetUnavailable
+from domain.submission import ValidationError,IdempotencyConflict,ProfileError,TaskNotFound,PreviewNotFound,PreviewAssetUnavailable,ApprovalConflict
 from service.task_http import RetryConflict,RetryIdempotencyConflict
 from persistence.connection import PersistenceError
 from service.http_bootstrap import build_http_service
@@ -85,6 +85,7 @@ def create_app(service=None):
         PreviewAssetUnavailable:(503,'PREVIEW_ASSET_UNAVAILABLE','Preview asset is temporarily unavailable.'),
         RetryIdempotencyConflict:(409,'IDEMPOTENCY_CONFLICT','Retry key conflicts with an existing request.'),
         RetryConflict:(409,'RETRY_CONFLICT','Task cannot be retried in its current state.'),
+        ApprovalConflict:(409,'APPROVAL_CONFLICT','Approval cannot be completed.'),
         PersistenceError:(503,'SERVICE_UNAVAILABLE','Service is temporarily unavailable.')}
     async def domain_error(request,exc):
         mapping=next(v for k,v in mappings.items() if isinstance(exc,k))
@@ -149,6 +150,17 @@ def create_app(service=None):
         if len(keys)!=1: raise ValidationError('idempotency_key')
         if await body(request)!={}: raise ValidationError('body')
         return await run_in_threadpool(application.retry,task_id,keys[0])
+    @app.post('/api/v1/tasks/{task_id}/approve')
+    async def approve(request:Request,task_id:str):
+        boundary(request)
+        keys=request.headers.getlist('idempotency-key')
+        if len(keys)!=1: raise ValidationError('idempotency_key')
+        value=await body(request)
+        if type(value) is not dict or 'content_version_id' not in value:
+            raise ValidationError('content_version_id')
+        if len(value) != 1:
+            raise ValidationError('body')
+        return await run_in_threadpool(application.approve,task_id,value['content_version_id'],keys[0])
     @app.get('/api/v1/system/status')
     async def status(request:Request):
         boundary(request)
@@ -165,4 +177,10 @@ def create_app(service=None):
             return error(request,503,'SERVICE_UNAVAILABLE','Requested resources are unavailable.')
     return app
 
-app=create_app()
+app=None
+
+def get_app():
+    global app
+    if app is None:
+        app = create_app()
+    return app
