@@ -18,6 +18,8 @@ UI_LIMITS={'topic_min':3,'topic_max':150,'brief_min':20,'brief_max':5000}
 
 class RetryConflict(ValueError): pass
 class RetryIdempotencyConflict(ValueError): pass
+class RevisionConflict(ValueError): pass
+class RevisionIdempotencyConflict(ValueError): pass
 
 def cursor_encode(value):
     return base64.urlsafe_b64encode(json.dumps({'v':1,'position':value},separators=(',',':')).encode()).decode().rstrip('=') if value else None
@@ -164,6 +166,39 @@ class TaskHTTPService:
             updated=repo.retry_task(task_id,task.current_run_id,task.status,idempotency_key,self.clock().isoformat())
             if updated is None: raise RetryConflict()
             return task_view(updated)
+
+    def request_revision(self, task_id, content_version_id, feedback, idempotency_key):
+        if (type(idempotency_key) is not str or not 1 <= len(idempotency_key) <= 200
+                or not idempotency_key.strip()):
+            raise ValidationError('idempotency_key')
+        if type(content_version_id) is not str or not content_version_id.strip():
+            raise ValidationError('content_version_id')
+        if type(feedback) is not str:
+            raise ValidationError('feedback')
+        normalized = feedback.strip()
+        if not normalized:
+            raise ValidationError('feedback')
+        if len(normalized) > 10000:
+            raise ValidationError('feedback')
+        with self.store.workspace_transaction(self.context().workspace_id) as repo:
+            existing = repo.find_revision_request(idempotency_key)
+            if existing is not None:
+                if existing[0] != task_id or existing[1] != content_version_id or existing[3] != normalized:
+                    raise RevisionIdempotencyConflict()
+                task = repo.get_task(task_id)
+                if task is None:
+                    raise TaskNotFound()
+                return task_view(task)
+
+            task = repo.get_task(task_id)
+            if task is None:
+                raise TaskNotFound()
+
+            result = repo.request_revision(task_id, content_version_id, normalized, idempotency_key, self.clock().isoformat())
+            if result is None:
+                raise RevisionConflict()
+            task, _ = result
+            return task_view(task)
     def approve(self, task_id, content_version_id, idempotency_key):
         if (type(idempotency_key) is not str or not 1 <= len(idempotency_key) <= 200
                 or not idempotency_key.strip()):

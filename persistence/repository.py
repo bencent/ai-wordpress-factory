@@ -338,6 +338,17 @@ class SQLiteInternalRepository(ProviderRepositoryMixin, ExecutionRepositoryMixin
             (workspace_id, idempotency_key)).fetchone()
         return None if row is None else (row['task_id'], row['content_version_id'])
 
+    def find_revision_request(self, workspace_id: str, idempotency_key: str) -> tuple[str, str, str, str] | None:
+        """Find an existing revision request by idempotency key.
+
+        Returns (task_id, content_version_id, resulting_run_id, feedback) if found, None otherwise.
+        """
+        row = self._conn.execute(
+            "SELECT task_id, content_version_id, resulting_run_id, feedback FROM task_revision_requests "
+            "WHERE workspace_id=? AND idempotency_key=?",
+            (workspace_id, idempotency_key)).fetchone()
+        return None if row is None else (row['task_id'], row['content_version_id'], row['resulting_run_id'], row['feedback'])
+
     def record_approval_request(self, workspace_id: str, task_id: str, idempotency_key: str, content_version_id: str, now: str) -> None:
         """Record an approval request for idempotency."""
         self._write()
@@ -345,6 +356,14 @@ class SQLiteInternalRepository(ProviderRepositoryMixin, ExecutionRepositoryMixin
             'INSERT INTO task_approval_requests '
             '(workspace_id,task_id,idempotency_key,content_version_id,created_at) VALUES (?,?,?,?,?)',
             (workspace_id, task_id, idempotency_key, content_version_id, now))
+
+    def record_revision_request(self, workspace_id: str, task_id: str, idempotency_key: str, content_version_id: str, feedback: str, resulting_run_id: str, now: str) -> None:
+        """Record a revision request for idempotency."""
+        self._write()
+        self._conn.execute(
+            'INSERT INTO task_revision_requests '
+            '(workspace_id,task_id,idempotency_key,content_version_id,feedback,resulting_run_id,created_at) VALUES (?,?,?,?,?,?,?)',
+            (workspace_id, task_id, idempotency_key, content_version_id, feedback, resulting_run_id, now))
 
 
 # Backwards-compatible internal name for existing Worker and persistence tests.

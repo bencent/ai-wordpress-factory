@@ -9,7 +9,7 @@ from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException
 from fastapi.concurrency import run_in_threadpool
 from domain.submission import ValidationError,IdempotencyConflict,ProfileError,TaskNotFound,PreviewNotFound,PreviewAssetUnavailable,ApprovalConflict
-from service.task_http import RetryConflict,RetryIdempotencyConflict
+from service.task_http import RetryConflict,RetryIdempotencyConflict,RevisionConflict,RevisionIdempotencyConflict
 from persistence.connection import PersistenceError
 from service.http_bootstrap import build_http_service
 
@@ -85,6 +85,8 @@ def create_app(service=None):
         PreviewAssetUnavailable:(503,'PREVIEW_ASSET_UNAVAILABLE','Preview asset is temporarily unavailable.'),
         RetryIdempotencyConflict:(409,'IDEMPOTENCY_CONFLICT','Retry key conflicts with an existing request.'),
         RetryConflict:(409,'RETRY_CONFLICT','Task cannot be retried in its current state.'),
+        RevisionIdempotencyConflict:(409,'IDEMPOTENCY_CONFLICT','Revision key conflicts with an existing request.'),
+        RevisionConflict:(409,'REVISION_CONFLICT','Task cannot be revised in its current state.'),
         ApprovalConflict:(409,'APPROVAL_CONFLICT','Approval cannot be completed.'),
         PersistenceError:(503,'SERVICE_UNAVAILABLE','Service is temporarily unavailable.')}
     async def domain_error(request,exc):
@@ -161,6 +163,17 @@ def create_app(service=None):
         if len(value) != 1:
             raise ValidationError('body')
         return await run_in_threadpool(application.approve,task_id,value['content_version_id'],keys[0])
+    @app.post('/api/v1/tasks/{task_id}/request-revision')
+    async def request_revision(request:Request,task_id:str):
+        boundary(request)
+        keys=request.headers.getlist('idempotency-key')
+        if len(keys)!=1: raise ValidationError('idempotency_key')
+        value=await body(request)
+        if type(value) is not dict or 'content_version_id' not in value or 'feedback' not in value:
+            raise ValidationError('content_version_id')
+        if len(value) != 2:
+            raise ValidationError('body')
+        return await run_in_threadpool(application.request_revision,task_id,value['content_version_id'],value['feedback'],keys[0])
     @app.get('/api/v1/system/status')
     async def status(request:Request):
         boundary(request)

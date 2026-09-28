@@ -190,10 +190,38 @@ class SQLiteWorkspaceRepository:
         """Find an existing approval request by idempotency key, scoped to this workspace."""
         return self._internal.find_approval_request(self._workspace_id, idempotency_key)
 
+    def find_revision_request(self, idempotency_key: str) -> tuple[str, str, str, str] | None:
+        """Find an existing revision request by idempotency key, scoped to this workspace."""
+        return self._internal.find_revision_request(self._workspace_id, idempotency_key)
+
     def record_approval_request(self, task_id: str, idempotency_key: str, content_version_id: str, now: str) -> None:
         """Record an approval request for idempotency, scoped to this workspace."""
         self._internal.record_approval_request(self._workspace_id, task_id, idempotency_key, content_version_id, now)
 
+    def record_revision_request(self, task_id: str, idempotency_key: str, content_version_id: str, feedback: str, resulting_run_id: str, now: str) -> None:
+        """Record a revision request for idempotency, scoped to this workspace."""
+        self._internal.record_revision_request(self._workspace_id, task_id, idempotency_key, content_version_id, feedback, resulting_run_id, now)
+
     def approve_content_version(self, task_id: str, content_version_id: str, now: str) -> tuple[bool, str | None]:
         """Approve a content version atomically, scoped to this workspace."""
         return self._internal.approve_content_version(self._workspace_id, task_id, content_version_id, now)
+
+    def request_revision(self, task_id: str, content_version_id: str, feedback: str, idempotency_key: str, now: str):
+        """Request revision for a content version.
+
+        Validates:
+        1. Task exists in workspace and status == AWAITING_APPROVAL
+        2. Task.latest_content_version_id == requested content_version_id
+        3. ContentVersion exists, belongs to this Task/workspace, status == AWAITING_APPROVAL
+        4. PreviewRecord exists for this ContentVersion/Task (complete preview)
+
+        If validation passes:
+        - Creates new TaskRun with run_mode=REVISION, status=QUEUED
+        - Updates Task: status=QUEUED, current_run_id=new_run
+        - Appends TASK_REVISION_REQUESTED event
+        - Records revision request for idempotency
+
+        Returns (Task, TaskRun) on success, None on validation failure.
+        Raises ValueError('IDEMPOTENCY_CONFLICT') on conflicting idempotency key.
+        """
+        return self._internal.request_revision(self._workspace_id, task_id, content_version_id, feedback, idempotency_key, now)

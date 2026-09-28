@@ -1,6 +1,6 @@
 """Fenced observer writes and the indivisible first-version completion."""
 from dataclasses import replace
-from domain.contracts import Task, Status, ContentVersion
+from domain.contracts import Task, Status, ContentVersion, TaskRun, TaskEvent, RunMode
 from .codec import encode_snapshot
 from .connection import PersistenceError
 from service.checkpoints import EVENTS, STAGES
@@ -165,3 +165,129 @@ class ExecutionRepositoryMixin:
         self.add(event)
 
         return True, None
+
+    def request_revision(self, workspace_id: str, task_id: str, content_version_id: str,
+                          feedback: str, idempotency_key: str, now: str):
+        """Request revision for a content version.
+
+        Performs in a single transaction:
+        1. Check idempotency key (replay if same workspace/task/CV/feedback)
+        2. Verify Task exists in workspace and status == AWAITING_APPROVAL
+        3. Verify Task.latest_content_version_id == requested content_version_id
+        4. Verify ContentVersion belongs to this Task/workspace, status == AWAITING_APPROVAL
+        5. Verify persisted PreviewRecord exists for this ContentVersion/Task with all 4 assets
+        6. Create new TaskRun with run_mode=REVISION, status=QUEUED
+        7. CAS transition Task: AWAITING_APPROVAL -> QUEUED, current_run_id=new_run
+        8. Append TASK_REVISION_REQUESTED event
+        9. Record revision request for idempotency
+
+        Returns (Task, TaskRun) on success, None on validation failure.
+        Raises ValueError('IDEMPOTENCY_CONFLICT') on conflicting idempotency key.
+        """
+        from uuid import uuid4
+        self._write()
+
+        # 1. Check idempotency FIRST - allows replay even if task state changed
+        existing = self._conn.execute(
+            "SELECT task_id, content_version_id, resulting_run_id, feedback FROM task_revision_requests "
+            "WHERE workspace_id=? AND idempotency_key=?",
+            (workspace_id, idempotency_key)).fetchone()
+        if existing is not None:
+            if existing['task_id'] != task_id or existing['content_version_id'] != content_version_id or existing['feedback'] != feedback:
+                raise ValueError('IDEMPOTENCY_CONFLICT')
+            # Replay: return current task state and the existing run
+            existing_run = self.get(TaskRun, existing['resulting_run_id'])
+            task = self.get(Task, task_id)
+            return (task, existing_run)
+
+        # 2. Verify Task exists in workspace and status == AWAITING_APPROVAL
+        task_row = self._conn.execute(
+            "SELECT t.* FROM tasks t JOIN workspaces w ON w.workspace_id=t.workspace_id "
+            "WHERE t.workspace_id=? AND t.task_id=? AND w.status='ACTIVE'",
+            (workspace_id, task_id)).fetchone()
+        if task_row is None:
+            return None
+        task = self._decode(Task, task_row)
+        if task.status != Status.AWAITING_APPROVAL:
+            return None
+
+        # 3. Verify Task.latest_content_version_id == requested content_version_id
+        if task.latest_content_version_id != content_version_id:
+            return None
+
+        # 4. Verify ContentVersion belongs to this Task/workspace and is AWAITING_APPROVAL
+        cv_row = self._conn.execute(
+            "SELECT cv.* FROM content_versions cv JOIN tasks t ON t.task_id=cv.task_id "
+            "JOIN workspaces w ON w.workspace_id=t.workspace_id "
+            "WHERE cv.content_version_id=? AND t.workspace_id=? AND w.status='ACTIVE'",
+            (content_version_id, workspace_id)).fetchone()
+        if cv_row is None:
+            return None
+        cv = self._decode(ContentVersion, cv_row)
+        if cv.task_id != task_id or cv.status != Status.AWAITING_APPROVAL:
+            return None
+
+        # 5. Verify persisted PreviewRecord exists with all 4 assets (uses existing validation)
+        preview = self.get_preview_by_content_version(content_version_id)
+        if preview is None:
+            return None
+        # get_preview_by_content_version already validates 4 assets exist (raises PersistenceError if incomplete)
+        # If we reach here, preview is complete with exactly 4 assets
+
+        # 6. Create new TaskRun with REVISION mode
+        attempt = self._conn.execute(
+            'SELECT MAX(r.attempt)+1 FROM task_runs r JOIN tasks t ON t.task_id=r.task_id '
+            'WHERE t.workspace_id=? AND t.task_id=?', (workspace_id, task_id)).fetchone()[0]
+
+        # Copy provider config from the current/previous run
+        current_run = self.get(TaskRun, task.current_run_id)
+        if current_run is None:
+            return None
+
+        run = TaskRun(
+            run_id=str(uuid4()),
+            task_id=task_id,
+            attempt=attempt,
+            created_at=now,
+            updated_at=now,
+            run_mode=RunMode.REVISION,
+            status=Status.QUEUED,
+            provider_connection_id=current_run.provider_connection_id,
+            provider_type=current_run.provider_type,
+            provider_mode=current_run.provider_mode,
+            model=current_run.model,
+            provider_configuration_version=current_run.provider_configuration_version,
+        )
+        self.add(run)
+
+        # 7. CAS transition Task: AWAITING_APPROVAL -> QUEUED, current_run_id = new run
+        # Also include latest_content_version_id in CAS predicate for exact-version safety
+        changed = self._conn.execute(
+            "UPDATE tasks SET status='QUEUED',current_run_id=?,updated_at=? "
+            "WHERE workspace_id=? AND task_id=? AND current_run_id=? AND status=? AND latest_content_version_id=?",
+            (run.run_id, now, workspace_id, task_id, task.current_run_id, Status.AWAITING_APPROVAL.value, content_version_id)).rowcount
+        if changed != 1:
+            raise PersistenceError('Revision conflict')
+
+        # 8. Append TASK_REVISION_REQUESTED event
+        sequence = self._conn.execute(
+            'SELECT COALESCE(MAX(sequence_number),0)+1 FROM task_events WHERE task_id=?', (task_id,)).fetchone()[0]
+        self.add(TaskEvent(
+            event_id=str(uuid4()),
+            event_key='revision:' + run.run_id,
+            task_id=task_id,
+            run_id=run.run_id,
+            attempt=attempt,
+            sequence_number=sequence,
+            type='TASK_REVISION_REQUESTED',
+            actor='system',
+            status=Status.QUEUED,
+            summary='內容已要求修改，等待重新產生',
+            created_at=now,
+            metadata={'content_version_id': content_version_id, 'revision_run_id': run.run_id}
+        ))
+
+        # 9. Record revision request for idempotency
+        self.record_revision_request(workspace_id, task_id, idempotency_key, content_version_id, feedback, run.run_id, now)
+
+        return (self.get(Task, task_id), run)
