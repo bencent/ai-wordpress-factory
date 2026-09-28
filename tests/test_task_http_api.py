@@ -179,7 +179,7 @@ def test_error_envelope_unexpected_and_routes(api,caplog):
     assert err['code']=='INTERNAL_ERROR'
     assert 'raw-exception' not in response.text+caplog.text and 'credential-canary' not in response.text+caplog.text
     routes={route.path for route in create_app(service).routes}
-    assert routes=={'/','/static','/api/v1/tasks','/api/v1/tasks/{task_id}','/api/v1/tasks/{task_id}/events','/api/v1/tasks/{task_id}/preview','/api/v1/tasks/{task_id}/preview/assets/{kind}','/api/v1/tasks/{task_id}/retry','/api/v1/system/status','/api/v1/ui/bootstrap'}
+    assert routes=={'/','/static','/api/v1/tasks','/api/v1/tasks/{task_id}','/api/v1/tasks/{task_id}/events','/api/v1/tasks/{task_id}/preview','/api/v1/tasks/{task_id}/preview/assets/{kind}','/api/v1/tasks/{task_id}/retry','/api/v1/tasks/{task_id}/approve','/api/v1/system/status','/api/v1/ui/bootstrap'}
     assert 'access-control-allow-origin' not in client.get('/api/v1/system/status',headers={'Origin':'https://elsewhere.example'}).headers
 
 def test_transport_uses_only_application_service():
@@ -368,3 +368,365 @@ def test_preview_asset_ordering_is_deterministic(api):
     ]
     actual_order = [a['kind'] for a in assets]
     assert actual_order == expected_order
+
+
+# =============================================================================
+# Phase 8.3-1: Approval Tests
+# =============================================================================
+
+def _setup_approval_task(store, workspace_ctx, provider, client):
+    """Create a task in AWAITING_APPROVAL state with content version and preview."""
+    task = create(store, workspace_ctx, provider)
+    with store.workspace_reader(workspace_ctx.workspace_id) as repo:
+        run = repo.get_run(task.task_id, task.current_run_id)
+        run_id = run.run_id
+
+    cv_id = _complete_task_with_content_version(store, task.task_id, run_id, workspace_ctx.workspace_id)
+    _insert_preview_for_task(store, task.task_id, cv_id, run_id, workspace_ctx.workspace_id)
+
+    # Update task status to AWAITING_APPROVAL
+    with store.workspace_transaction(workspace_ctx.workspace_id) as repo:
+        repo._internal._conn.execute(
+            "UPDATE tasks SET status='AWAITING_APPROVAL', updated_at=? WHERE task_id=?",
+            (now(), task.task_id)
+        )
+
+    return task, cv_id, run_id
+
+
+def test_approve_valid(api):
+    """Valid approval: AWAITING_APPROVAL -> APPROVED."""
+    client, service, store, a, b, pa, pb = api
+    task, cv_id, run_id = _setup_approval_task(store, a, pa, client)
+
+    response = client.post(
+        f'/api/v1/tasks/{task.task_id}/approve',
+        json={'content_version_id': cv_id},
+        headers={'Idempotency-Key': 'approval-key-1'}
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data['status'] == 'APPROVED'
+    assert data['latest_content_version_id'] == cv_id
+
+    # Verify event was created
+    events_response = client.get(f'/api/v1/tasks/{task.task_id}/events')
+    assert events_response.status_code == 200
+    events = events_response.json()['events']
+    approved_events = [e for e in events if e['type'] == 'TASK_APPROVED']
+    assert len(approved_events) == 1
+    assert approved_events[0]['metadata']['content_version_id'] == cv_id
+    assert approved_events[0]['status'] == 'APPROVED'
+    assert approved_events[0]['actor'] == 'system'
+
+
+def test_approve_exact_version_binding(api):
+    """Requested content_version_id must equal Task.latest_content_version_id."""
+    client, service, store, a, b, pa, pb = api
+    task, cv_id, run_id = _setup_approval_task(store, a, pa, client)
+
+    # Try to approve with a different (stale) content_version_id
+    stale_cv_id = str(uuid4())
+    response = client.post(
+        f'/api/v1/tasks/{task.task_id}/approve',
+        json={'content_version_id': stale_cv_id},
+        headers={'Idempotency-Key': 'approval-key-2'}
+    )
+    assert response.status_code == 409
+    err = response.json()['error']
+    assert err['code'] == 'APPROVAL_CONFLICT'
+
+    # Verify task is still AWAITING_APPROVAL
+    get_response = client.get(f'/api/v1/tasks/{task.task_id}')
+    assert get_response.json()['status'] == 'AWAITING_APPROVAL'
+
+
+def test_approve_requires_preview(api):
+    """Approval requires persisted Preview for that ContentVersion."""
+    client, service, store, a, b, pa, pb = api
+    task = create(store, a, pa)
+    with store.workspace_reader(a.workspace_id) as repo:
+        run = repo.get_run(task.task_id, task.current_run_id)
+        run_id = run.run_id
+
+    cv_id = _complete_task_with_content_version(store, task.task_id, run_id, a.workspace_id)
+    # NO preview inserted
+
+    # Update task status to AWAITING_APPROVAL
+    with store.workspace_transaction(a.workspace_id) as repo:
+        repo._internal._conn.execute(
+            "UPDATE tasks SET status='AWAITING_APPROVAL', updated_at=? WHERE task_id=?",
+            (now(), task.task_id)
+        )
+
+    response = client.post(
+        f'/api/v1/tasks/{task.task_id}/approve',
+        json={'content_version_id': cv_id},
+        headers={'Idempotency-Key': 'approval-key-3'}
+    )
+    assert response.status_code == 409
+    err = response.json()['error']
+    assert err['code'] == 'APPROVAL_CONFLICT'
+
+
+def test_approve_stale_content_version(api):
+    """Stale/wrong ContentVersion cannot approve."""
+    client, service, store, a, b, pa, pb = api
+    task, cv_id, run_id = _setup_approval_task(store, a, pa, client)
+
+    # Create a second content version (simulating a revision)
+    cv_id_2 = str(uuid4())
+    cv2 = ContentVersion(
+        content_version_id=cv_id_2,
+        task_id=task.task_id,
+        run_id=run_id,
+        version_number=2,
+        content_type=ContentType.POST,
+        title='Test Title v2',
+        content='<p>Test content v2</p>',
+        validation_result={'passed': True},
+        created_at=now(),
+        updated_at=now(),
+        status=Status.AWAITING_APPROVAL
+    )
+    with store.transaction() as repo:
+        repo.add(cv2)
+        repo._conn.execute(
+            "UPDATE tasks SET latest_content_version_id=?, updated_at=? WHERE task_id=?",
+            (cv_id_2, now(), task.task_id)
+        )
+
+    # Try to approve with the OLD content_version_id
+    response = client.post(
+        f'/api/v1/tasks/{task.task_id}/approve',
+        json={'content_version_id': cv_id},
+        headers={'Idempotency-Key': 'approval-key-4'}
+    )
+    assert response.status_code == 409
+    err = response.json()['error']
+    assert err['code'] == 'APPROVAL_CONFLICT'
+
+
+def test_approve_wrong_task_state(api):
+    """Wrong Task state cannot approve."""
+    client, service, store, a, b, pa, pb = api
+    task = create(store, a, pa)  # Task is QUEUED, not AWAITING_APPROVAL
+    with store.workspace_reader(a.workspace_id) as repo:
+        run = repo.get_run(task.task_id, task.current_run_id)
+        run_id = run.run_id
+
+    cv_id = _complete_task_with_content_version(store, task.task_id, run_id, a.workspace_id)
+    _insert_preview_for_task(store, task.task_id, cv_id, run_id, a.workspace_id)
+
+    response = client.post(
+        f'/api/v1/tasks/{task.task_id}/approve',
+        json={'content_version_id': cv_id},
+        headers={'Idempotency-Key': 'approval-key-5'}
+    )
+    assert response.status_code == 409
+    err = response.json()['error']
+    assert err['code'] == 'APPROVAL_CONFLICT'
+
+
+def test_approve_foreign_workspace(api):
+    """Foreign workspace returns TASK_NOT_FOUND and cannot approve."""
+    client, service, store, a, b, pa, pb = api
+    foreign_task, cv_id, run_id = _setup_approval_task(store, b, pb, client)
+
+    response = client.post(
+        f'/api/v1/tasks/{foreign_task.task_id}/approve',
+        json={'content_version_id': cv_id},
+        headers={'Idempotency-Key': 'approval-key-6'}
+    )
+    assert response.status_code == 404
+    err = response.json()['error']
+    assert err['code'] == 'TASK_NOT_FOUND'
+
+
+def test_approve_missing_task(api):
+    """Missing Task returns TASK_NOT_FOUND."""
+    client, service, store, a, b, pa, pb = api
+    response = client.post(
+        '/api/v1/tasks/missing-task-id/approve',
+        json={'content_version_id': str(uuid4())},
+        headers={'Idempotency-Key': 'approval-key-7'}
+    )
+    assert response.status_code == 404
+    err = response.json()['error']
+    assert err['code'] == 'TASK_NOT_FOUND'
+
+
+def test_approve_appends_exactly_one_task_approved_event(api):
+    """Successful approval appends exactly one TASK_APPROVED event."""
+    client, service, store, a, b, pa, pb = api
+    task, cv_id, run_id = _setup_approval_task(store, a, pa, client)
+
+    # Get initial event count
+    events_before = client.get(f'/api/v1/tasks/{task.task_id}/events').json()['events']
+    initial_count = len(events_before)
+
+    response = client.post(
+        f'/api/v1/tasks/{task.task_id}/approve',
+        json={'content_version_id': cv_id},
+        headers={'Idempotency-Key': 'approval-key-8'}
+    )
+    assert response.status_code == 200
+
+    events_after = client.get(f'/api/v1/tasks/{task.task_id}/events').json()['events']
+    approved_events = [e for e in events_after if e['type'] == 'TASK_APPROVED']
+    assert len(approved_events) == 1
+    assert len(events_after) == initial_count + 1
+
+
+def test_approve_event_metadata_contains_content_version_id(api):
+    """Event metadata contains approved content_version_id."""
+    client, service, store, a, b, pa, pb = api
+    task, cv_id, run_id = _setup_approval_task(store, a, pa, client)
+
+    response = client.post(
+        f'/api/v1/tasks/{task.task_id}/approve',
+        json={'content_version_id': cv_id},
+        headers={'Idempotency-Key': 'approval-key-9'}
+    )
+    assert response.status_code == 200
+
+    events = client.get(f'/api/v1/tasks/{task.task_id}/events').json()['events']
+    approved_event = next(e for e in events if e['type'] == 'TASK_APPROVED')
+    assert approved_event['metadata']['content_version_id'] == cv_id
+
+
+def test_approve_atomic_task_transition_and_event(api):
+    """Task transition + event are atomic."""
+    client, service, store, a, b, pa, pb = api
+    task, cv_id, run_id = _setup_approval_task(store, a, pa, client)
+
+    # Verify initial state
+    with store.workspace_reader(a.workspace_id) as repo:
+        t = repo.get_task(task.task_id)
+        assert t.status == Status.AWAITING_APPROVAL
+        events = repo.public_events(task.task_id, after_sequence=0)
+        approved_events = [e for e in events if e.type == 'TASK_APPROVED']
+        assert len(approved_events) == 0
+
+    # Approve
+    response = client.post(
+        f'/api/v1/tasks/{task.task_id}/approve',
+        json={'content_version_id': cv_id},
+        headers={'Idempotency-Key': 'approval-key-10'}
+    )
+    assert response.status_code == 200
+
+    # Verify atomic result
+    with store.workspace_reader(a.workspace_id) as repo:
+        t = repo.get_task(task.task_id)
+        assert t.status == Status.APPROVED
+        events = repo.public_events(task.task_id, after_sequence=0)
+        approved_events = [e for e in events if e.type == 'TASK_APPROVED']
+        assert len(approved_events) == 1
+        assert approved_events[0].metadata.get('content_version_id') == cv_id
+
+
+def test_approve_double_approval_no_second_event(api):
+    """Double/concurrent approval cannot create a second approval event."""
+    client, service, store, a, b, pa, pb = api
+    task, cv_id, run_id = _setup_approval_task(store, a, pa, client)
+
+    # First approval
+    response1 = client.post(
+        f'/api/v1/tasks/{task.task_id}/approve',
+        json={'content_version_id': cv_id},
+        headers={'Idempotency-Key': 'approval-key-11'}
+    )
+    assert response1.status_code == 200
+
+    # Second approval with DIFFERENT idempotency key (should fail due to state)
+    response2 = client.post(
+        f'/api/v1/tasks/{task.task_id}/approve',
+        json={'content_version_id': cv_id},
+        headers={'Idempotency-Key': 'approval-key-12'}
+    )
+    assert response2.status_code == 409
+
+    # Verify only one TASK_APPROVED event
+    events = client.get(f'/api/v1/tasks/{task.task_id}/events').json()['events']
+    approved_events = [e for e in events if e['type'] == 'TASK_APPROVED']
+    assert len(approved_events) == 1
+
+
+def test_approve_idempotent_same_key_same_payload(api):
+    """Same Idempotency-Key + same payload replays without another event."""
+    client, service, store, a, b, pa, pb = api
+    task, cv_id, run_id = _setup_approval_task(store, a, pa, client)
+
+    # First approval
+    response1 = client.post(
+        f'/api/v1/tasks/{task.task_id}/approve',
+        json={'content_version_id': cv_id},
+        headers={'Idempotency-Key': 'approval-key-13'}
+    )
+    assert response1.status_code == 200
+
+    # Replay with same key and payload
+    response2 = client.post(
+        f'/api/v1/tasks/{task.task_id}/approve',
+        json={'content_version_id': cv_id},
+        headers={'Idempotency-Key': 'approval-key-13'}
+    )
+    assert response2.status_code == 200
+    assert response2.json()['status'] == 'APPROVED'
+
+    # Verify only one TASK_APPROVED event
+    events = client.get(f'/api/v1/tasks/{task.task_id}/events').json()['events']
+    approved_events = [e for e in events if e['type'] == 'TASK_APPROVED']
+    assert len(approved_events) == 1
+
+
+def test_approve_idempotent_same_key_different_payload(api):
+    """Same Idempotency-Key + different payload uses existing conflict behavior."""
+    client, service, store, a, b, pa, pb = api
+    task, cv_id, run_id = _setup_approval_task(store, a, pa, client)
+
+    # First approval
+    response1 = client.post(
+        f'/api/v1/tasks/{task.task_id}/approve',
+        json={'content_version_id': cv_id},
+        headers={'Idempotency-Key': 'approval-key-14'}
+    )
+    assert response1.status_code == 200
+
+    # Replay with same key but DIFFERENT content_version_id
+    different_cv_id = str(uuid4())
+    response2 = client.post(
+        f'/api/v1/tasks/{task.task_id}/approve',
+        json={'content_version_id': different_cv_id},
+        headers={'Idempotency-Key': 'approval-key-14'}
+    )
+    assert response2.status_code == 400
+    err = response2.json()['error']
+    assert err['code'] == 'VALIDATION_ERROR'
+
+
+def test_approve_does_not_invoke_publisher(api):
+    """Approval does NOT invoke Publisher / WordPress."""
+    # This test verifies that the approval endpoint doesn't call any
+    # WordPress publishing functionality. The test passes if approval
+    # succeeds without any network calls (which are mocked in the fixture).
+    client, service, store, a, b, pa, pb = api
+    task, cv_id, run_id = _setup_approval_task(store, a, pa, client)
+
+    response = client.post(
+        f'/api/v1/tasks/{task.task_id}/approve',
+        json={'content_version_id': cv_id},
+        headers={'Idempotency-Key': 'approval-key-15'}
+    )
+    assert response.status_code == 200
+    assert response.json()['status'] == 'APPROVED'
+    # If we reach here without the WordPressPublisher mock raising,
+    # the test passes (the fixture mocks WordPressPublisher to assert False)
+
+
+def test_approve_route_exists(api):
+    """Existing public route-set expectation includes the new approve route."""
+    client, service, *rest = api
+    routes = {route.path for route in create_app(service).routes}
+    assert '/api/v1/tasks/{task_id}/approve' in routes

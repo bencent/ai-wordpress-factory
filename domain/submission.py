@@ -49,6 +49,13 @@ class PreviewAssetUnavailable(Exception):
         super().__init__(message)
 
 
+class ApprovalConflict(ValueError):
+    code = "APPROVAL_CONFLICT"
+
+    def __init__(self, message: str = "Approval cannot be completed"):
+        super().__init__(message)
+
+
 @dataclass(frozen=True, kw_only=True)
 class SubmissionProfile:
     """Trusted, credential-free projection supplied by the composition layer.

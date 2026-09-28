@@ -3,7 +3,7 @@ import base64,json,os
 from datetime import datetime,timezone
 from pathlib import Path
 from uuid import UUID
-from domain.submission import ValidationError,TaskNotFound,SubmissionProfile,ProfileError,PreviewNotFound,PreviewAssetUnavailable
+from domain.submission import ValidationError,TaskNotFound,SubmissionProfile,ProfileError,PreviewNotFound,PreviewAssetUnavailable,ApprovalConflict
 from domain.contracts import Status
 from domain.failures import SAFE_RUN_ERROR_CODES
 from domain.preview import PreviewAssetKind
@@ -52,19 +52,20 @@ def task_view(task,run=None):
 def event_view(event):
     from service.checkpoints import STAGES,EVENTS
     known={'TASK_CREATED','TASK_RETRY_REQUESTED','CONTENT_VERSION_CREATED','RUN_COMPLETED','TASK_AWAITING_APPROVAL',
-        'RUN_FAILED','WORKER_LOST'}|{'FACTORY_'+e.upper() for e in EVENTS}
+        'RUN_FAILED','WORKER_LOST','TASK_APPROVED'}|{'FACTORY_'+e.upper() for e in EVENTS}
     kind=event.type if event.type in known else 'TASK_UPDATED'
     metadata={}
     data=event.metadata
-    for key in ('stage','agent'):
+    for key in ('stage','agent','content_version_id'):
         val=data.get(key)
-        if type(val) is str and val in STAGES: metadata[key]=val
+        if type(val) is str: metadata[key]=val
     code=data.get('error_code')
     if type(code) is str and code in SAFE_RUN_ERROR_CODES: metadata['error_code']=code
     if type(event.attempt) is int: metadata['attempt']=event.attempt
     return {'event_id':event.event_id,'task_id':event.task_id,'run_id':event.run_id,
         'sequence_number':event.sequence_number,'type':kind,'status':event.status,'attempt':event.attempt,
-        'summary':{'TASK_CREATED':'任務已建立','TASK_RETRY_REQUESTED':'任務已排入重試佇列'}.get(kind,'任務狀態已更新'),
+        'actor':event.actor,
+        'summary':{'TASK_CREATED':'任務已建立','TASK_RETRY_REQUESTED':'任務已排入重試佇列','TASK_APPROVED':'內容已通過審核'}.get(kind,'任務狀態已更新'),
         'metadata':metadata,'created_at':event.created_at}
 
 def preview_view(stored):
@@ -162,6 +163,48 @@ class TaskHTTPService:
             if task.status not in (Status.FAILED,Status.WORKER_LOST): raise RetryConflict()
             updated=repo.retry_task(task_id,task.current_run_id,task.status,idempotency_key,self.clock().isoformat())
             if updated is None: raise RetryConflict()
+            return task_view(updated)
+    def approve(self, task_id, content_version_id, idempotency_key):
+        if (type(idempotency_key) is not str or not 1 <= len(idempotency_key) <= 200
+                or not idempotency_key.strip()):
+            raise ValidationError('idempotency_key')
+        if type(content_version_id) is not str or not content_version_id.strip():
+            raise ValidationError('content_version_id')
+        with self.store.workspace_transaction(self.context().workspace_id) as repo:
+            # Check for existing idempotency key
+            existing = repo.find_approval_request(idempotency_key)
+            if existing is not None:
+                if existing[0] != task_id or existing[1] != content_version_id:
+                    raise ValidationError('idempotency_key')
+                # Replay: return current task state
+                task = repo.get_task(task_id)
+                if task is None:
+                    raise TaskNotFound()
+                return task_view(task)
+
+            task = repo.get_task(task_id)
+            if task is None:
+                raise TaskNotFound()
+
+            success, error_code = repo.approve_content_version(task_id, content_version_id, self.clock().isoformat())
+            if not success:
+                if error_code == 'TASK_NOT_FOUND':
+                    raise TaskNotFound()
+                elif error_code == 'WRONG_TASK_STATE':
+                    raise ApprovalConflict('Task cannot be approved in its current state')
+                elif error_code == 'VERSION_MISMATCH':
+                    raise ApprovalConflict('Content version does not match the task')
+                elif error_code == 'VERSION_NOT_FOUND':
+                    raise ApprovalConflict('Content version not found')
+                elif error_code == 'PREVIEW_NOT_FOUND':
+                    raise ApprovalConflict('Preview not found for this content version')
+                else:
+                    raise ApprovalConflict('Approval failed')
+
+            # Record idempotency key
+            repo.record_approval_request(task_id, idempotency_key, content_version_id, self.clock().isoformat())
+
+            updated = repo.get_task(task_id)
             return task_view(updated)
     def status(self):
         from persistence.connection import PersistenceError
