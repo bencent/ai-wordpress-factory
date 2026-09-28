@@ -1,4 +1,5 @@
 """Fenced observer writes and the indivisible first-version completion."""
+from dataclasses import replace
 from domain.contracts import Task, Status, ContentVersion
 from .codec import encode_snapshot
 from .connection import PersistenceError
@@ -58,9 +59,16 @@ class ExecutionRepositoryMixin:
             self._reject(lease, now, 'complete')
             return False
         task = self.get(Task, lease.task_id)
+        # Authoritative version allocation: compute next version_number inside transaction
+        next_version_row = self._conn.execute(
+            "SELECT COALESCE(MAX(version_number), 0) + 1 FROM content_versions WHERE task_id = ?",
+            (lease.task_id,)).fetchone()
+        next_version_number = next_version_row[0] if next_version_row else 1
+        # Build ContentVersion with authoritative version_number (frozen dataclass)
+        version = replace(version, version_number=next_version_number)
         if (type(version) is not ContentVersion or version.task_id != lease.task_id
                 or version.run_id != lease.run_id or version.content_type != task.content_type
-                or version.version_number != 1 or task.latest_content_version_id is not None
+                or version.version_number != next_version_number
                 or version.status != Status.AWAITING_APPROVAL or not version.content.strip()
                 or snapshot.get('id') != lease.task_id):
             raise PersistenceError('Invalid completion contract')
