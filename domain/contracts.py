@@ -70,6 +70,7 @@ class TaskRun:
     error: dict[str, Any] | None = None
     resumed_from_run_id: str | None = None
     resumed_from_checkpoint_id: str | None = None
+    source_revision_run_id: str | None = None
     provider_connection_id: str | None = None
     provider_type: str | None = None
     provider_mode: str | None = None

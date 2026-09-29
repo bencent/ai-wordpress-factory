@@ -1,17 +1,12 @@
 """Worker-only provider composition and per-call audit. No retry/fallback."""
 from time import perf_counter
 from uuid import uuid4
-from domain.ai_runtime import ProviderBundle, ProviderFailure, ErrorCode, TextResult, RuntimeOnly, classify_error
+from domain.ai_runtime import ProviderBundle, ProviderFailure, ErrorCode, TextResult, RuntimeOnly, classify_error, InvocationPersistenceFailed
 from domain.providers import Capability, AIInvocation, InvocationStatus, ProviderError, VerificationStatus
 from domain.execution import LeaseLost
 from providers.composition import provider_from_connection, EnvironmentCredentialResolver
 from service.execution import now
 from worker.claiming import LeaseService
-
-
-class InvocationPersistenceFailed(RuntimeError):
-    def __init__(self):
-        super().__init__('AI_INVOCATION_PERSISTENCE_FAILED')
 
 
 class ProviderSession:

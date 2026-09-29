@@ -21,6 +21,7 @@ from worker.providers import ProviderSession, GuardedObserver
 from providers.composition import provider_from_connection
 from persistence.connection import PersistenceError
 from persistence.codec import CodecError
+from worker.revision import RevisionContext, build_revision_context
 
 HUMAN = {'mode': 'REQUIRE_HUMAN_REVIEW'}
 LEGACY_HUMAN = ApprovalPolicy(mode=ApprovalPolicyMode.REQUIRE_HUMAN_REVIEW).to_dict()
@@ -201,11 +202,20 @@ class FactoryAdapter:
         service = LeaseService(self.store)
         service.assert_active(lease)
         with self.store.workspace_reader(lease.workspace_id) as repo:
-            task, run = repo.get_task(lease.task_id), repo.get_run(lease.task_id,lease.run_id)
+            task, run = repo.get_task(lease.task_id), repo.get_run(lease.task_id, lease.run_id)
         if task is None or run is None:
             raise LeaseLost()
-        if run.run_mode != RunMode.INITIAL or run.workflow_state is not None:
+        # Handle REVISION runs: resolve RevisionContext
+        revision_context = None
+        if run.run_mode == RunMode.REVISION:
+            revision_context = build_revision_context(repo, lease.workspace_id, run.run_id)
+        elif run.workflow_state is not None:
+            # Non-None workflow_state still unsupported (checkpoint/resume)
             raise ValueError('Checkpoint resume is unavailable in Phase 8.1')
+        elif run.run_mode != RunMode.INITIAL:
+            # Unknown/unsupported run mode
+            raise ValueError(f'Unsupported run_mode: {run.run_mode}')
+
         legacy = map_task(task)
         cfg = self.config_resolver(task.site_id)
         if not isinstance(cfg, Config):
@@ -215,18 +225,20 @@ class FactoryAdapter:
         cfg = deepcopy(cfg)
         # Worker agents never need WordPress credentials.
         cfg.wordpress_url = cfg.wordpress_username = cfg.wordpress_password = cfg.wordpress_app_password = ''
-        session = ProviderSession(self.store,lease,run,cfg,provider_factory=self.provider_factory,
+        session = ProviderSession(self.store, lease, run, cfg, provider_factory=self.provider_factory,
                                   credential_resolver=self.credential_resolver)
         cfg.openai_api_key = cfg.search_api_key = None
-        factory = self.factory_class.for_run(legacy, cfg,providers=session.bundle,
-                                            workspace_id=lease.workspace_id,run_id=lease.run_id)
+        factory = self.factory_class.for_run(legacy, cfg, providers=session.bundle,
+                                            workspace_id=lease.workspace_id, run_id=lease.run_id,
+                                            revision_context=revision_context)
         options = {} if self.image_downloader is None else {'downloader': self.image_downloader}
         images = LocalImages(self.image_root, task.site_id, task.task_id, run.run_id, workspace_id=lease.workspace_id, **options)
         factory.images = images
         observer = PersistingObserver(self.store, lease, cancelled, images)
         try:
             with safe_factory_logs():
-                factory.run_workflow(task.task_id, observer=GuardedObserver(session,observer))
+                factory.run_workflow(task.task_id, observer=GuardedObserver(session, observer),
+                                    revision_context=revision_context)
         except ObserverError:
             if session.failure is not None:
                 raise session.failure
@@ -237,7 +249,6 @@ class FactoryAdapter:
             if observer.error is not None:
                 raise observer.error
             raise
-        session.check()
         if cancelled.is_set():
             raise LeaseLost()
         legacy = factory.state.get_task(task.task_id)

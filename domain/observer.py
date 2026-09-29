@@ -33,7 +33,7 @@ def observed_workflow(method):
     from functools import wraps
 
     @wraps(method)
-    def observed(self, task_id, observer=None):
-        return self._observe_workflow(method, task_id, observer)
+    def observed(self, task_id, observer=None, revision_context=None):
+        return self._observe_workflow(method, task_id, observer, revision_context)
 
     return observed

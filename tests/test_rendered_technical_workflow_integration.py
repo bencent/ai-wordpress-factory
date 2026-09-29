@@ -2143,7 +2143,7 @@ class TestVisualQualityWorkflowIntegration(unittest.TestCase):
         preview = _make_preview_artifact(task_id=task.id)
         observer = Mock()
 
-        def review_step(factory, task_id):
+        def review_step(factory, task_id, revision_context=None):
             with factory._agent_step(task, "visual_quality"):
                 factory._run_visual_quality_review(task, preview)
             return False

@@ -42,7 +42,7 @@ def submit(store, key='a', kind='POST'):
 class Harness(BackgroundFactory):
     options={}
     seen=[]
-    def run_workflow(self, task_id, observer=None):
+    def run_workflow(self, task_id, observer=None, revision_context=None):
         task=self.state.get_task(task_id)
         helper=fixtures.TestImageFailureSemantics()
         helper.factory=self
@@ -63,7 +63,7 @@ class Harness(BackgroundFactory):
                 task.image_artifact=self.options['artifact']
             if self.options.get('before'): self.options['before'](self,task,mocks)
             self.seen.append((self,task,mocks))
-            result=super().run_workflow(task_id,observer=observer)
+            result=super().run_workflow(task_id,observer=observer,revision_context=revision_context)
             if self.options.get('after'): self.options['after'](self,task,mocks)
             return result
 
@@ -187,7 +187,7 @@ def test_lost_worker_cannot_complete(store,tmp_path):
     Worker(store,adapter(store,tmp_path)).run_once()
     task,run,version,events=read(store,task)
     assert task.status==Status.WORKER_LOST and version is None
-    assert events[-1].type=='WORKER_UPDATE_REJECTED'
+    assert events[-1].type=='WORKER_LOST'
 
 def test_policy_and_identity_rejected(store):
     task=submit(store)

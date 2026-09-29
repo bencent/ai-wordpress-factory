@@ -16,6 +16,7 @@ class ErrorCode(str, Enum):
     INVALID_REQUEST = 'INVALID_REQUEST'
     INVALID_RESPONSE = 'INVALID_RESPONSE'
     UNSUPPORTED_CAPABILITY = 'UNSUPPORTED_CAPABILITY'
+    AI_INVOCATION_PERSISTENCE_FAILED = 'AI_INVOCATION_PERSISTENCE_FAILED'
     UNKNOWN = 'UNKNOWN'
 
 
@@ -28,8 +29,10 @@ class ProviderFailure(RuntimeError):
 
 
 def classify_error(error):
-    if isinstance(error,ProviderFailure):
+    if isinstance(error, ProviderFailure):
         return ProviderFailure(error.code)
+    if isinstance(error, InvocationPersistenceFailed):
+        return error  # internal persistence failure propagates as-is
     # SDK exception types/status only; never inspect or copy sensitive messages/bodies.
     name = type(error).__name__
     status = getattr(error,'status_code',None)
@@ -48,6 +51,17 @@ def classify_error(error):
     else:
         code = ErrorCode.UNKNOWN
     return ProviderFailure(code)
+
+
+class InvocationPersistenceFailed(RuntimeError):
+    """Internal failure to persist AI invocation/audit record.
+
+    This is an INTERNAL infrastructure failure, not an external AI provider failure.
+    It propagates through classify_error unchanged so Worker can identify it
+    as AI_INVOCATION_PERSISTENCE_FAILED.
+    """
+    def __init__(self):
+        super().__init__('AI_INVOCATION_PERSISTENCE_FAILED')
 
 
 class RuntimeOnly:

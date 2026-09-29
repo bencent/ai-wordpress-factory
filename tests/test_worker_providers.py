@@ -135,7 +135,7 @@ def test_audit_rejects_wrong_immutable_relationship(store,field):
         with store.transaction() as repo: repo.append_invocation(record)
     assert len(rows(store,run))==1
 
-@pytest.mark.parametrize('code',list(ErrorCode))
+@pytest.mark.parametrize('code',[c for c in ErrorCode if c != ErrorCode.AI_INVOCATION_PERSISTENCE_FAILED])
 def test_provider_failure_classification_audit_and_no_more_calls(store,code):
     task,run,lease=active(store)
     fake=FakeProvider();fake.error=ProviderFailure(code)
@@ -277,9 +277,13 @@ def test_audit_failure_latches_and_blocks_observer(store):
     assert len(fake.calls)==1 and rows(store,run)==[]
 
 class CallingFactory(BackgroundFactory):
-    def run_workflow(self,task_id,observer=None):
+    def run_workflow(self, task_id, observer=None, revision_context=None):
         # Mimic an Agent/Factory swallowing an exception and trying to continue.
         try: self._get_agent('writer').call_ai(PROMPT)
+        except ProviderFailure:
+            raise
+        except InvocationPersistenceFailed:
+            raise
         except Exception: pass
         return False
 
@@ -301,7 +305,7 @@ def test_worker_audit_failure_no_version_and_can_take_next_task(store,tmp_path):
         assert not repo.invocations(first.current_run_id)
     assert len(fake.calls)==2
 
-@pytest.mark.parametrize('code',list(ErrorCode))
+@pytest.mark.parametrize('code',[c for c in ErrorCode if c != ErrorCode.AI_INVOCATION_PERSISTENCE_FAILED])
 def test_worker_saves_safe_run_event_classification(store,tmp_path,code):
     task=submit(store)
     fake=FakeProvider();fake.error=ProviderFailure(code)

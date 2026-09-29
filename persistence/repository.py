@@ -71,16 +71,28 @@ class SQLiteInternalRepository(ProviderRepositoryMixin, ExecutionRepositoryMixin
         if not self._writable or not self._conn.in_transaction:
             raise PersistenceError("Repository writes require an explicit transaction")
 
+    def _get_table_columns(self, table):
+        """Get list of column names for a table."""
+        if not hasattr(self, '_table_columns_cache'):
+            self._table_columns_cache = {}
+        if table not in self._table_columns_cache:
+            rows = self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+            self._table_columns_cache[table] = {row[1] for row in rows}
+        return self._table_columns_cache[table]
+
     def add(self, record):
         self._write()
         if type(record) not in RECORDS:
             raise TypeError("Unsupported record")
         table, _ = RECORDS[type(record)]
         data = record_to_mapping(record)
+        # Filter to only columns that exist in the table (backward compatibility)
+        existing_columns = self._get_table_columns(table)
+        filtered_data = {k: v for k, v in data.items() if k in existing_columns}
         values = [encode_snapshot(v) if k in JSON_FIELDS and v is not None else v
-                  for k, v in data.items()]
-        columns = ','.join(data)
-        placeholders = ','.join('?' for _ in data)
+                  for k, v in filtered_data.items()]
+        columns = ','.join(filtered_data)
+        placeholders = ','.join('?' for _ in filtered_data)
         self._conn.execute(f"INSERT INTO {table} ({columns}) VALUES ({placeholders})", values)
 
     def _decode(self, cls, row):
@@ -348,6 +360,17 @@ class SQLiteInternalRepository(ProviderRepositoryMixin, ExecutionRepositoryMixin
             "WHERE workspace_id=? AND idempotency_key=?",
             (workspace_id, idempotency_key)).fetchone()
         return None if row is None else (row['task_id'], row['content_version_id'], row['resulting_run_id'], row['feedback'])
+
+    def find_revision_request_by_run_id(self, workspace_id: str, run_id: str) -> tuple[str, str, str] | None:
+        """Find a revision request by its resulting run ID.
+
+        Returns (task_id, content_version_id, feedback) if found, None otherwise.
+        """
+        row = self._conn.execute(
+            "SELECT task_id, content_version_id, feedback FROM task_revision_requests "
+            "WHERE workspace_id=? AND resulting_run_id=?",
+            (workspace_id, run_id)).fetchone()
+        return None if row is None else (row['task_id'], row['content_version_id'], row['feedback'])
 
     def record_approval_request(self, workspace_id: str, task_id: str, idempotency_key: str, content_version_id: str, now: str) -> None:
         """Record an approval request for idempotency."""

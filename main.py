@@ -93,13 +93,14 @@ class AIWordPressFactory:
 
     @classmethod
     def for_run(cls, task: Task, runtime_config: Config, *, providers=None,
-                workspace_id=None, run_id=None, observer=None):
+                workspace_id=None, run_id=None, observer=None, revision_context=None):
         """Fresh context for one execution; no global state or config loader mutation."""
         state = WorkflowState()
         state.add_task(task)
         factory = cls(runtime_config=runtime_config, state=state, providers=providers)
         factory.run_context = RunContext(workspace_id or "legacy-local",task.id,run_id or str(uuid.uuid4()),
                                          factory.state,observer or NoOpObserver(),factory.providers)
+        factory.revision_context = revision_context
         return factory
 
     @property
@@ -146,7 +147,7 @@ class AIWordPressFactory:
             self._emit("agent_completed", task, name)
             self._emit("checkpoint_produced", task, name)
 
-    def _observe_workflow(self, operation, task_id: str, observer: Optional[WorkflowObserver] = None) -> bool:
+    def _observe_workflow(self, operation, task_id: str, observer: Optional[WorkflowObserver] = None, revision_context=None) -> bool:
         """Retain legacy bool results, including False when awaiting approval.
 
         Observer errors propagate and stop execution. Checkpoints are detached

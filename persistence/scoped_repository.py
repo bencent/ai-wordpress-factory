@@ -3,7 +3,7 @@
 There is deliberately no generic get(cls, id), arbitrary SQL, or execution mutation API.
 The workspace ID is required, with no default-workspace fallback in persistence.
 """
-from domain.contracts import Task, TaskRun, TaskEvent
+from domain.contracts import Task, TaskRun, TaskEvent, ContentVersion
 from domain.providers import Workspace, AIProviderConnection, Capability
 from domain.preview import StoredPreview
 from persistence.connection import PersistenceError
@@ -36,6 +36,15 @@ class SQLiteWorkspaceRepository:
             "WHERE t.workspace_id=? AND t.task_id=? AND r.run_id=? AND w.status='ACTIVE'",
             (self._workspace_id,task_id,run_id)).fetchone()
         return self._internal._decode(TaskRun,row)
+
+    def get_run_by_id(self, run_id):
+        """Get a TaskRun by run_id only, scoped to workspace."""
+        row = self._internal._conn.execute(
+            "SELECT r.* FROM task_runs r JOIN tasks t ON t.task_id=r.task_id "
+            "JOIN workspaces w ON w.workspace_id=t.workspace_id "
+            "WHERE t.workspace_id=? AND r.run_id=? AND w.status='ACTIVE'",
+            (self._workspace_id, run_id)).fetchone()
+        return self._internal._decode(TaskRun, row)
 
     def find_by_submission_key(self, submission_key):
         row = self._internal._conn.execute(
@@ -85,6 +94,17 @@ class SQLiteWorkspaceRepository:
             (self._workspace_id,provider_connection_id)).fetchone()
         return self._internal._decode(AIProviderConnection,row)
 
+    def get_content_version(self, content_version_id: str):
+        """Get a ContentVersion scoped to this workspace."""
+        row = self._internal._conn.execute(
+            "SELECT cv.* FROM content_versions cv JOIN tasks t ON t.task_id=cv.task_id "
+            "JOIN workspaces w ON w.workspace_id=t.workspace_id "
+            "WHERE cv.content_version_id=? AND t.workspace_id=? AND w.status='ACTIVE'",
+            (content_version_id, self._workspace_id)).fetchone()
+        if row is None:
+            return None
+        return self._internal._decode(ContentVersion, row)
+
     def text_connections(self):
         rows = self._internal._conn.execute(
             "SELECT p.* FROM ai_provider_connections p JOIN workspaces w ON w.workspace_id=p.workspace_id "
@@ -116,7 +136,7 @@ class SQLiteWorkspaceRepository:
 
     def retry_task(self, task_id, expected_run_id, expected_status, idempotency_key, now):
         from uuid import uuid4
-        from domain.contracts import Status
+        from domain.contracts import Status, RunMode
         self._internal._write()
         task=self.get_task(task_id)
         if (task is None or task.status not in (Status.FAILED,Status.WORKER_LOST)
@@ -128,10 +148,18 @@ class SQLiteWorkspaceRepository:
         attempt=self._internal._conn.execute(
             'SELECT MAX(r.attempt)+1 FROM task_runs r JOIN tasks t ON t.task_id=r.task_id '
             'WHERE t.workspace_id=? AND t.task_id=?',(self._workspace_id,task_id)).fetchone()[0]
+        # Preserve run_mode from failed run
+        new_run_mode = old.run_mode
+        # For REVISION runs, track lineage via source_revision_run_id
+        source_revision_run_id = old.source_revision_run_id
+        if old.run_mode == RunMode.REVISION and source_revision_run_id is None:
+            # First retry of a revision run: lineage points to the original revision run
+            source_revision_run_id = old.run_id
         run=TaskRun(run_id=str(uuid4()),task_id=task_id,attempt=attempt,created_at=now,updated_at=now,
             provider_connection_id=old.provider_connection_id,provider_type=old.provider_type,
             provider_mode=old.provider_mode,model=old.model,
-            provider_configuration_version=old.provider_configuration_version)
+            provider_configuration_version=old.provider_configuration_version,
+            run_mode=new_run_mode,source_revision_run_id=source_revision_run_id)
         self.add(run)
         changed=self._internal._conn.execute(
             "UPDATE tasks SET status='QUEUED',current_run_id=?,updated_at=? "
@@ -193,6 +221,13 @@ class SQLiteWorkspaceRepository:
     def find_revision_request(self, idempotency_key: str) -> tuple[str, str, str, str] | None:
         """Find an existing revision request by idempotency key, scoped to this workspace."""
         return self._internal.find_revision_request(self._workspace_id, idempotency_key)
+
+    def find_revision_request_by_run_id(self, run_id: str) -> tuple[str, str, str] | None:
+        """Find a revision request by its resulting run ID, scoped to this workspace.
+
+        Returns (task_id, content_version_id, feedback) if found, None otherwise.
+        """
+        return self._internal.find_revision_request_by_run_id(self._workspace_id, run_id)
 
     def record_approval_request(self, task_id: str, idempotency_key: str, content_version_id: str, now: str) -> None:
         """Record an approval request for idempotency, scoped to this workspace."""

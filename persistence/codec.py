@@ -2,7 +2,7 @@
 import json
 import math
 import types
-from dataclasses import fields
+from dataclasses import fields, MISSING
 from enum import Enum
 from typing import Any, get_args, get_origin, get_type_hints
 
@@ -53,11 +53,26 @@ def convert(value, hint):
 
 
 def record_from_mapping(cls, data):
+    if type(data) is not dict:
+        raise CodecError("Record data must be a dict")
     names = {f.name for f in fields(cls)}
-    if type(data) is not dict or set(data) != names:
-        raise CodecError("Missing or unknown record field")
+    extra = set(data) - names
+    if extra:
+        raise CodecError(f"Unknown record fields: {extra}")
     hints = get_type_hints(cls)
-    return cls(**{key: convert(value, hints[key]) for key, value in data.items()})
+    kwargs = {}
+    for f in fields(cls):
+        if f.name in data:
+            kwargs[f.name] = convert(data[f.name], hints[f.name])
+        else:
+            # Use default value for missing fields (backward compatibility)
+            if f.default is not MISSING:
+                kwargs[f.name] = f.default
+            elif f.default_factory is not MISSING:
+                kwargs[f.name] = f.default_factory()
+            else:
+                raise CodecError(f"Missing required field: {f.name}")
+    return cls(**kwargs)
 
 
 def record_to_mapping(record):
