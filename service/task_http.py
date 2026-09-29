@@ -20,6 +20,8 @@ class RetryConflict(ValueError): pass
 class RetryIdempotencyConflict(ValueError): pass
 class RevisionConflict(ValueError): pass
 class RevisionIdempotencyConflict(ValueError): pass
+class PublishConflict(ValueError): pass
+class PublishIdempotencyConflict(ValueError): pass
 
 def cursor_encode(value):
     return base64.urlsafe_b64encode(json.dumps({'v':1,'position':value},separators=(',',':')).encode()).decode().rstrip('=') if value else None
@@ -78,6 +80,14 @@ def preview_view(stored):
             'width':a.width,'height':a.height,'byte_size':a.byte_size,'sha256':a.sha256})
     return {'preview_id':record.preview_id,'task_id':record.task_id,'run_id':record.run_id,
         'content_version_id':record.content_version_id,'created_at':record.created_at,'assets':assets}
+
+def publication_view(request):
+    # Remote columns stay null until a future executor records a confirmed outcome.
+    # No workspace, key, or run lineage is exposed to the caller.
+    return {'publication_id':request.publication_id,'task_id':request.task_id,
+        'content_version_id':request.content_version_id,'content_type':request.content_type.value,
+        'state':request.state.value,'remote_resource_id':request.remote_resource_id,
+        'remote_url':request.remote_url,'created_at':request.created_at,'updated_at':request.updated_at}
 
 class TaskHTTPService:
     def __init__(self,store,resolver,*,context_provider=default_workspace_context,clock=None,preview_base_dir="artifacts/previews"):
@@ -241,6 +251,40 @@ class TaskHTTPService:
 
             updated = repo.get_task(task_id)
             return task_view(updated)
+    def request_publish(self, task_id, content_version_id, idempotency_key):
+        """Record an explicit intent to publish the approved ContentVersion.
+
+        This is a durable local record only. It performs no network I/O, does not
+        start a TaskRun, and never advances the publication past PENDING. The
+        repository remains the sole authority on which version is approved.
+        """
+        if (type(idempotency_key) is not str or not 1 <= len(idempotency_key) <= 200
+                or not idempotency_key.strip()):
+            raise ValidationError('idempotency_key')
+        if type(content_version_id) is not str:
+            raise ValidationError('content_version_id')
+        normalized = content_version_id.strip()
+        if not normalized:
+            raise ValidationError('content_version_id')
+        with self.store.workspace_transaction(self.context().workspace_id) as repo:
+            existing = repo.find_publication(idempotency_key)
+            if existing is not None:
+                if existing[0] != task_id or existing[1] != normalized:
+                    raise PublishIdempotencyConflict()
+                request = repo.get_publication(existing[2])
+                if request is None:
+                    raise PublishConflict('Publication request is unavailable')
+                return publication_view(request)
+
+            request, error_code = repo.request_publication(
+                task_id, normalized, idempotency_key, self.clock().isoformat())
+            if request is None:
+                if error_code == 'TASK_NOT_FOUND':
+                    raise TaskNotFound()
+                # A version the caller cannot see is reported exactly like a version
+                # that simply is not the approved one, so existence never leaks.
+                raise PublishConflict('Content version cannot be published')
+            return publication_view(request)
     def status(self):
         from persistence.connection import PersistenceError
         from domain.submission import ProfileError

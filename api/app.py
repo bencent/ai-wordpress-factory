@@ -9,7 +9,7 @@ from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException
 from fastapi.concurrency import run_in_threadpool
 from domain.submission import ValidationError,IdempotencyConflict,ProfileError,TaskNotFound,PreviewNotFound,PreviewAssetUnavailable,ApprovalConflict
-from service.task_http import RetryConflict,RetryIdempotencyConflict,RevisionConflict,RevisionIdempotencyConflict
+from service.task_http import RetryConflict,RetryIdempotencyConflict,RevisionConflict,RevisionIdempotencyConflict,PublishConflict,PublishIdempotencyConflict
 from persistence.connection import PersistenceError
 from service.http_bootstrap import build_http_service
 
@@ -88,6 +88,8 @@ def create_app(service=None):
         RevisionIdempotencyConflict:(409,'IDEMPOTENCY_CONFLICT','Revision key conflicts with an existing request.'),
         RevisionConflict:(409,'REVISION_CONFLICT','Task cannot be revised in its current state.'),
         ApprovalConflict:(409,'APPROVAL_CONFLICT','Approval cannot be completed.'),
+        PublishIdempotencyConflict:(409,'IDEMPOTENCY_CONFLICT','Publication key conflicts with an existing request.'),
+        PublishConflict:(409,'PUBLISH_CONFLICT','Task cannot be published in its current state.'),
         PersistenceError:(503,'SERVICE_UNAVAILABLE','Service is temporarily unavailable.')}
     async def domain_error(request,exc):
         mapping=next(v for k,v in mappings.items() if isinstance(exc,k))
@@ -163,6 +165,19 @@ def create_app(service=None):
         if len(value) != 1:
             raise ValidationError('body')
         return await run_in_threadpool(application.approve,task_id,value['content_version_id'],keys[0])
+
+    @app.post('/api/v1/tasks/{task_id}/publish')
+    async def publish(request:Request,task_id:str):
+        # Records durable publish intent only. No WordPress call, no TaskRun, no worker.
+        boundary(request)
+        keys=request.headers.getlist('idempotency-key')
+        if len(keys)!=1: raise ValidationError('idempotency_key')
+        value=await body(request)
+        if type(value) is not dict or 'content_version_id' not in value:
+            raise ValidationError('content_version_id')
+        if len(value)!=1: raise ValidationError('body')
+        return await run_in_threadpool(application.request_publish,task_id,value['content_version_id'],keys[0])
+
     @app.post('/api/v1/tasks/{task_id}/request-revision')
     async def request_revision(request:Request,task_id:str):
         boundary(request)
