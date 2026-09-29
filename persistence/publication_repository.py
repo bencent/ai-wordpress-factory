@@ -10,6 +10,10 @@ from persistence.connection import PersistenceError
 
 APPROVAL_EVENT = 'TASK_APPROVED'
 EXECUTOR_LOST = 'EXECUTOR_LOST'
+# A stale lease that expired before the durable may-send boundary: no remote
+# create was attempted, so the outcome is known and the row is FAILED.
+EXECUTOR_LOST_BEFORE_SEND = 'EXECUTOR_LOST_BEFORE_SEND'
+PUBLICATION_ALREADY_EXISTS = 'PUBLICATION_ALREADY_EXISTS'
 
 _CLAIM_PREDICATE = ("publication_id=? AND workspace_id=? AND owner_id=? "
                     "AND fencing_token=? AND state='IN_PROGRESS'")
@@ -136,6 +140,24 @@ class PublicationRepositoryMixin:
             # is reported before any row exists, so nothing is recorded that could
             # later be claimed and executed against an unknown target.
             return None, 'NO_ACTIVE_PUBLISHING_TARGET'
+        # Publication lineage: one durable publication per approved content version
+        # and target, regardless of which Idempotency-Key was used. A different key
+        # means "this is a different request", not "publish this content again";
+        # republish is a separate, future product feature. Returning a conflict
+        # rather than replaying the first row matters: replaying would answer with
+        # a publication the caller never asked for, under a key they believe is new.
+        #
+        # The database enforces the same invariant via UNIQUE(workspace_id,
+        # content_version_id, target_id). This check exists to return a precise
+        # domain code; the constraint is what makes it correct under concurrency.
+        lineage = self._conn.execute(
+            "SELECT publication_id FROM task_publication_requests "
+            "WHERE workspace_id=? AND content_version_id=? AND target_id=?",
+            (workspace_id, approved.content_version_id, target['target_id'])).fetchone()
+        if lineage is not None:
+            # Deliberately does NOT surface the existing row's idempotency key: it
+            # is another caller's request identity and is not theirs to learn.
+            raise ValueError(PUBLICATION_ALREADY_EXISTS)
         request = PublicationRequest(publication_id=str(uuid4()), workspace_id=workspace_id,
                                      task_id=task_id, content_version_id=approved.content_version_id,
                                      approved_run_id=approved.run_id, content_type=approved.content_type,
@@ -277,28 +299,74 @@ class PublicationRepositoryMixin:
             (lease.publication_id,)).fetchone())
         return True
 
-    def expire_stale_publications(self, cutoff, now):
-        """Fence out executors whose lease went silent, as outcome-unknown.
+    def mark_publication_may_send(self, lease, now):
+        """Record that a remote create MAY now be attempted. Commit, then call the gateway.
 
-        IN_PROGRESS becomes INDETERMINATE and the fencing token is incremented, so
-        a resumed executor can never persist an outcome. It never returns to
-        PENDING: the system cannot distinguish "crashed before the call" from
-        "crashed after WordPress accepted the request", so both are ambiguous.
+        This is the durable boundary that separates a crash which provably never
+        attempted a remote create from one that may have. It MUST be committed in
+        its own transaction before ``gateway.publish`` is invoked, because a
+        create that is sent and then lost is indistinguishable from one that was
+        never sent unless the marker was already durable.
+
+        It states nothing about the request itself: it does not mean bytes left
+        the process, that WordPress received anything, or that a resource was
+        created. It is the weakest durable claim that is still useful.
+
+        Same-lease replay returns **False**. A second call means the caller is
+        about to make a second create attempt, and returning True would let a
+        duplicated gateway invocation hide behind an idempotent-looking result.
+        The timestamp is not rewritten, and the database refuses to clear or
+        change it, so the first boundary stands even if this returns False.
+        """
+        self._write()
+        if self.owned_publication(lease) is None:
+            return False
+        changed = self._conn.execute(
+            "UPDATE task_publication_requests SET may_send_at=?,updated_at=? "
+            f"WHERE {_CLAIM_PREDICATE} AND may_send_at IS NULL",
+            (now, now, lease.publication_id, lease.workspace_id, lease.owner_id,
+             lease.fencing_token)).rowcount
+        return changed == 1
+
+    def expire_stale_publications(self, cutoff, now):
+        """Fence out executors whose lease went silent, split by the may-send boundary.
+
+        may_send_at IS NULL     -> FAILED / EXECUTOR_LOST_BEFORE_SEND. The remote
+                                   create was never attempted, so the remote
+                                   outcome is known and the row is terminally
+                                   failed rather than left ambiguous.
+        may_send_at IS NOT NULL -> INDETERMINATE / EXECUTOR_LOST. A create may
+                                   have been attempted, so nothing is provable
+                                   and reconciliation is required.
+
+        Both paths increment the fencing token, so a resumed executor is
+        permanently fenced out and cannot persist an outcome. Neither ever
+        returns to PENDING: PENDING implies a fresh external call, and a terminal
+        state may already have produced a remote resource. A publication is never
+        automatically retried; INDETERMINATE resolution is a later, explicit slice.
         """
         self._write()
         rows = self._conn.execute(
-            "SELECT publication_id,owner_id,fencing_token FROM task_publication_requests "
+            "SELECT publication_id,owner_id,fencing_token,may_send_at "
+            "FROM task_publication_requests "
             "WHERE state='IN_PROGRESS' AND COALESCE(heartbeat_at,claimed_at) <= ?",
             (cutoff,)).fetchall()
         expired = 0
         for row in rows:
+            # A pre-send crash is a local failure, not an unknown remote outcome.
+            # Using INDETERMINATE there would claim a create may have happened
+            # when this executor provably never sent one, and would send it
+            # through needless reconciliation.
+            state = 'INDETERMINATE' if row['may_send_at'] is not None else 'FAILED'
+            code = EXECUTOR_LOST if row['may_send_at'] is not None else EXECUTOR_LOST_BEFORE_SEND
             changed = self._conn.execute(
-                "UPDATE task_publication_requests SET state='INDETERMINATE',error_code=?,"
+                "UPDATE task_publication_requests SET state=?,error_code=?,"
                 "fencing_token=fencing_token+1,updated_at=? "
                 "WHERE publication_id=? AND state='IN_PROGRESS' AND fencing_token=? "
-                "AND owner_id IS ? AND COALESCE(heartbeat_at,claimed_at) <= ?",
-                (EXECUTOR_LOST, now, row['publication_id'], row['fencing_token'],
-                 row['owner_id'], cutoff)).rowcount
+                "AND owner_id IS ? AND may_send_at IS ? "
+                "AND COALESCE(heartbeat_at,claimed_at) <= ?",
+                (state, code, now, row['publication_id'], row['fencing_token'],
+                 row['owner_id'], row['may_send_at'], cutoff)).rowcount
             expired += changed
         return expired
 

@@ -67,9 +67,10 @@ _SUCCESS_STATUSES = frozenset({200, 201})
 # did not happen.
 _AUTH_STATUSES = frozenset({401, 403})
 
-# 429 is a definite rejection: the server answered instead of processing. This
-# is CONFIRMED_FAILURE and is NOT retried, because a retry would be an
-# automatic second create attempt against a server that already refused.
+# 429 is NOT a definite refusal. WordPress core does not emit it; it comes from a
+# plugin, WAF or reverse proxy, and no contract proves such a layer refused before
+# forwarding. It maps to OUTCOME_UNKNOWN. It is still never retried -- an automatic
+# second create attempt is unsafe regardless of how the outcome is classified.
 _RATE_LIMIT_STATUS = 429
 
 # 408 is the one 4xx that is NOT definite: the server timed out waiting, and
@@ -240,7 +241,23 @@ class WordPressGateway:
             code = "AUTHENTICATION" if status_code == 401 else "PERMISSION"
             return PublishOutcome(kind=PublishOutcomeKind.CONFIRMED_FAILURE, error_code=code)
         if status_code == _RATE_LIMIT_STATUS:
-            return PublishOutcome(kind=PublishOutcomeKind.CONFIRMED_FAILURE,
+            # 429 is treated as OUTCOME_UNKNOWN, not as a definite refusal.
+            #
+            # WordPress core does not emit 429; it comes from a plugin, WAF or
+            # reverse proxy, and nothing in the REST contract proves that such a
+            # layer refused BEFORE forwarding. If a limiter answers 429 after the
+            # post was already created, CONFIRMED_FAILURE would write a terminal
+            # FAILED for a resource that exists -- orphaning it permanently, since
+            # a terminal state is never reconciled and never retried.
+            #
+            # The cost of being wrong in the other direction is one INDETERMINATE
+            # that reconciliation resolves to NOT_FOUND, which is read-only and
+            # self-correcting. The asymmetry decides it: when the remote outcome
+            # cannot be proven, do not claim it was.
+            #
+            # This is still not retried. The no-retry half of the decision is
+            # independent and correct on its own.
+            return PublishOutcome(kind=PublishOutcomeKind.OUTCOME_UNKNOWN,
                                   error_code="RATE_LIMIT")
         if status_code == _UNCERTAIN_CLIENT_STATUS:
             return PublishOutcome(kind=PublishOutcomeKind.OUTCOME_UNKNOWN,

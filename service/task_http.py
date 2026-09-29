@@ -23,6 +23,7 @@ class RevisionIdempotencyConflict(ValueError): pass
 class PublishConflict(ValueError): pass
 class PublishIdempotencyConflict(ValueError): pass
 class PublishTargetUnavailable(ValueError): pass
+class PublicationAlreadyExists(ValueError): pass
 
 def cursor_encode(value):
     return base64.urlsafe_b64encode(json.dumps({'v':1,'position':value},separators=(',',':')).encode()).decode().rstrip('=') if value else None
@@ -277,8 +278,18 @@ class TaskHTTPService:
                     raise PublishConflict('Publication request is unavailable')
                 return publication_view(request)
 
-            request, error_code = repo.request_publication(
-                task_id, normalized, idempotency_key, self.clock().isoformat())
+            try:
+                request, error_code = repo.request_publication(
+                    task_id, normalized, idempotency_key, self.clock().isoformat())
+            except ValueError as conflict:
+                # A publication lineage already exists for this approved content
+                # version and target. This is deliberately a distinct 409 rather
+                # than the idempotency replay path: replaying the first row would
+                # answer a NEW request with a different caller's durable intent,
+                # and the caller would believe their own request was recorded.
+                if str(conflict) == 'PUBLICATION_ALREADY_EXISTS':
+                    raise PublicationAlreadyExists()
+                raise
             if request is None:
                 if error_code == 'TASK_NOT_FOUND':
                     raise TaskNotFound()

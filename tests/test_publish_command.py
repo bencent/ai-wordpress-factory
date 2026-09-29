@@ -346,13 +346,17 @@ class TestContentMapping:
         _task, request, lease, _version = _approved_and_leased(store, workspace)
         first = PublishCommandService(store).build(lease)
         assert first.slug == 'chosen-slug'
-        second_request = _publish_request(store, workspace, first.task_id,
-                                          first.content_version_id, 'second-intent')
-        assert second_request.slug if hasattr(second_request, 'slug') else True
-        # Same slug, different publication id: different reconciliation identity.
-        assert first.slug == 'chosen-slug'
-        assert reconciliation_marker(first.publication_id) != reconciliation_marker(
-            second_request.publication_id)
+        # 3C5B locked decision A: a new idempotency key cannot mint a second
+        # publication lineage for the same approved version and target, so the
+        # reconciliation identity cannot be re-derived from the slug.
+        with pytest.raises(ValueError, match='PUBLICATION_ALREADY_EXISTS'):
+            _publish_request(store, workspace, first.task_id, first.content_version_id,
+                            'second-intent')
+        # The original identity is untouched, and no second identity was minted.
+        again = PublishCommandService(store).build(lease)
+        assert again.slug == 'chosen-slug'
+        assert again.reconciliation_marker == first.reconciliation_marker
+        assert reconciliation_marker(first.publication_id) == first.reconciliation_marker
 
 
 class TestTaxonomyMapping:
@@ -660,7 +664,7 @@ class TestIsolationFromSideEffects:
 
     def test_no_migration_added(self):
         versions = sorted(int(p.name[:4]) for p in (ROOT / 'persistence/migrations').glob('*.sql'))
-        assert versions == list(range(1, 12))
+        assert versions == list(range(1, 13))
 
     def test_publication_table_has_no_marker_column(self):
         """The marker is derived, so duplicating it in storage is not required."""

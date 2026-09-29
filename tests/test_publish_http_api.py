@@ -301,13 +301,31 @@ class TestPublishIdempotency:
         assert response.json()['error']['code'] == 'IDEMPOTENCY_CONFLICT'
         assert len(_publications(store, workspace)) == 1
 
-    def test_different_keys_create_separate_requests(self, api, store, workspace):
-        """Cross-key policy is deliberately undecided in 3B."""
+    def test_different_keys_cannot_create_a_second_lineage(self, api, store, workspace):
+        """3C5B locked decision A: one publication lineage per approved version+target.
+
+        A different Idempotency-Key means "a different request", not "publish this
+        again". Republish is a separate future product feature and must not be
+        reachable by changing the key.
+        """
         client, _, _ = api
         task, version_id, _ = _approved(api, store, workspace)
         assert _publish(client, task.task_id, version_id, 'k1').status_code == 200
-        assert _publish(client, task.task_id, version_id, 'k2').status_code == 200
-        assert len({r['publication_id'] for r in _publications(store, workspace)}) == 2
+        second = _publish(client, task.task_id, version_id, 'k2')
+        assert second.status_code == 409
+        assert second.json()['error']['code'] == 'PUBLICATION_ALREADY_EXISTS'
+        assert len({r['publication_id'] for r in _publications(store, workspace)}) == 1
+
+    def test_lineage_conflict_does_not_replay_the_first_publication(self, api, store, workspace):
+        """The conflict must not answer with the first publication's identity."""
+        client, _, _ = api
+        task, version_id, _ = _approved(api, store, workspace)
+        first = _publish(client, task.task_id, version_id, 'k1').json()
+        second = _publish(client, task.task_id, version_id, 'k2')
+        assert second.status_code == 409
+        body = second.text
+        assert 'publication_id' not in body
+        assert 'k1' not in body
 
 
 class TestPublishValidation:

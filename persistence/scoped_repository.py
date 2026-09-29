@@ -347,6 +347,15 @@ class SQLiteWorkspaceRepository:
         """Refresh an owned lease. Never changes state; false means the lease is stale."""
         return self._internal.heartbeat_publication(lease, now)
 
+    def mark_publication_may_send(self, lease, now):
+        """Durably cross the may-send boundary. Commit before calling the gateway.
+
+        Returns True only for the first crossing by this exact lease; a replay
+        returns False so a duplicated create attempt cannot hide behind an
+        idempotent-looking result.
+        """
+        return self._internal.mark_publication_may_send(lease, now)
+
     def complete_publication(self, lease, remote_resource_id, remote_url, now):
         """Record a confirmed external success under an active lease."""
         return self._internal.complete_publication(lease, remote_resource_id, remote_url, now)

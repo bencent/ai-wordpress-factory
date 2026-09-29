@@ -485,13 +485,25 @@ class TestFailureTaxonomy:
         assert outcome.kind is PublishOutcomeKind.CONFIRMED_FAILURE
         assert outcome.error_code == "PERMISSION"
 
-    def test_429_is_confirmed_failure_and_not_retried(self):
-        """A 429 is a completed refusal, so nothing was created."""
+    def test_429_is_outcome_unknown_and_not_retried(self):
+        """A 429 is NOT provably a refusal, so it must not become a terminal FAILED.
+
+        WordPress core never emits 429; it comes from a plugin, WAF or reverse
+        proxy, and nothing proves such a layer refused before forwarding. If the
+        post already existed, CONFIRMED_FAILURE would orphan it permanently.
+        """
         gateway, transport = make_gateway([HttpResponse(status_code=429, body_text="{}")])
         outcome = gateway.publish(make_command(ContentType.POST))
-        assert outcome.kind is PublishOutcomeKind.CONFIRMED_FAILURE
+        assert outcome.kind is PublishOutcomeKind.OUTCOME_UNKNOWN
         assert outcome.error_code == "RATE_LIMIT"
+        assert outcome.remote is None
         assert transport.call_count == 1
+
+    def test_429_maps_to_indeterminate_in_the_executor_mapping(self):
+        """The executor maps OUTCOME_UNKNOWN to INDETERMINATE, so 429 must not be FAILED."""
+        gateway, _ = make_gateway([HttpResponse(status_code=429, body_text="{}")])
+        outcome = gateway.publish(make_command(ContentType.POST))
+        assert outcome.publication_state.value == "INDETERMINATE"
 
     def test_408_is_outcome_unknown_because_body_may_be_processed(self):
         gateway, _ = make_gateway([HttpResponse(status_code=408, body_text="{}")])
@@ -620,9 +632,17 @@ class TestNoAutomaticRetry:
         assert transport.call_count == 1
 
     def test_429_triggers_no_retry(self):
+        """No-retry is independent of classification and still holds."""
         gateway, transport = make_gateway([HttpResponse(status_code=429, body_text="{}")])
         gateway.publish(make_command(ContentType.POST))
         assert transport.call_count == 1
+
+    def test_repeated_429_issues_one_call_per_explicit_publish(self):
+        gateway, transport = make_gateway([HttpResponse(status_code=429, body_text="{}")])
+        command = make_command(ContentType.POST)
+        gateway.publish(command)
+        gateway.publish(command)
+        assert transport.call_count == 2  # one per explicit call, never more
 
     def test_5xx_triggers_no_retry(self):
         gateway, transport = make_gateway([HttpResponse(status_code=503, body_text="{}")])

@@ -42,6 +42,27 @@ SAFE_PUBLICATION_ERROR_CODES = frozenset({
     # what is provable, because a refused connection and a lost response are
     # different facts about the same publish attempt.
     'CONNECTION_NOT_ESTABLISHED', 'READ_TIMEOUT', 'CONNECTION_LOST',
+    # Added by the publication execution safety contract (8.3-3C5B).
+    #
+    # These are LOCAL pre-network failures. Each one is provable BEFORE any
+    # request is sent, so the remote outcome is known: nothing was created.
+    #
+    # They are deliberately separate from the remote codes above. Reusing
+    # AUTHENTICATION for "the credential could not be resolved locally" would
+    # claim WordPress rejected the request when it was never contacted, and
+    # reusing INVALID_REQUEST would claim a remote 4xx that never happened.
+    'LEGACY_TARGET_SNAPSHOT_MISSING',
+    'TARGET_NOT_FOUND',
+    'TARGET_DISABLED',
+    'TARGET_CONFIGURATION_DRIFT',
+    'UNSUPPORTED_PUBLISHING_PROVIDER',
+    'CREDENTIAL_UNAVAILABLE',
+    'CONNECTION_INVALID',
+    'PUBLISH_COMMAND_INVALID',
+    # A stale lease that expired BEFORE crossing the durable may-send boundary.
+    # Distinct from EXECUTOR_LOST because a remote create was never attempted,
+    # so the publication is FAILED rather than INDETERMINATE.
+    'EXECUTOR_LOST_BEFORE_SEND',
 })
 
 
@@ -166,6 +187,11 @@ class PublicationRequest:
     # is detectable; the credential is resolved later from the target row.
     target_id: str | None = None
     target_configuration_version: int | None = None
+    # The durable may-send boundary. NULL means no remote create was attempted;
+    # non-NULL means one MAY have been. It is set by the executor while the
+    # publication is IN_PROGRESS and is never cleared, so expiry can distinguish
+    # a crash that provably never attempted a create from one that may have.
+    may_send_at: str | None = None
 
     def __post_init__(self):
         _validate_uuid(self.publication_id, "publication_id")
@@ -214,6 +240,8 @@ class PublicationRequest:
         # checked for drift, and a version with no target identifies nothing.
         if (self.target_id is None) != (self.target_configuration_version is None):
             raise ValueError("target_id and target_configuration_version are both required or both absent")
+        if self.may_send_at is not None:
+            _validate_non_empty_str(self.may_send_at, "may_send_at")
         if self.target_id is not None:
             _validate_non_empty_str(self.target_id, "target_id")
             if (type(self.target_configuration_version) is not int

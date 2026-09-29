@@ -99,7 +99,7 @@ class TestMigration0005Preview:
         with factory.connection() as conn:
             versions = [r[0] for r in conn.execute(
                 'SELECT version FROM schema_migrations ORDER BY version')]
-            assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+            assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
 
     def test_02_both_tables_exist(self, factory):
         """Both preview_records and preview_assets tables exist."""
@@ -424,7 +424,7 @@ class TestMigration0005Preview:
         with factory.connection() as conn:
             v2 = [r[0] for r in conn.execute(
                 'SELECT version FROM schema_migrations ORDER BY version')]
-        assert v1 == v2 == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        assert v1 == v2 == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
 
     def test_24_injected_failure_rolls_back_atomically(self, tmp_path):
         """Injected failing 0005 rolls back: version stays 4, no residue, data intact."""

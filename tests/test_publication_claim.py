@@ -384,16 +384,49 @@ class TestOwnershipAndHeartbeat:
 
 
 class TestStaleExpiry:
-    def test_stale_in_progress_expires_to_indeterminate(self, store, workspace):
+    """3C5B split expiry by the durable may-send boundary.
+
+    A crash BEFORE the boundary provably never attempted a remote create, so the
+    row is terminally FAILED. A crash at or after it may have attempted one, so
+    the row is INDETERMINATE and requires reconciliation.
+    """
+
+    def test_stale_in_progress_before_may_send_expires_to_failed(self, store, workspace):
+        """No remote create was attempted, so the outcome is known."""
         _approved(store, workspace)
         claimed_at = _past(60)
         lease = _claim(store, workspace, now=claimed_at)
         later = _past(0)
         assert _expire(store, later, later) == 1
         row = _row(store, workspace, lease.publication_id)
+        assert row['state'] == 'FAILED'
+        assert row['error_code'] == 'EXECUTOR_LOST_BEFORE_SEND'
+        assert 'EXECUTOR_LOST_BEFORE_SEND' in SAFE_PUBLICATION_ERROR_CODES
+        assert row['may_send_at'] is None
+
+    def test_stale_in_progress_after_may_send_expires_to_indeterminate(self, store, workspace):
+        """A create may have been attempted, so nothing is provable."""
+        _approved(store, workspace)
+        claimed_at = _past(60)
+        lease = _claim(store, workspace, now=claimed_at)
+        with store.workspace_transaction(workspace) as repo:
+            assert repo.mark_publication_may_send(lease, now_func()) is True
+        later = _past(0)
+        assert _expire(store, later, later) == 1
+        row = _row(store, workspace, lease.publication_id)
         assert row['state'] == 'INDETERMINATE'
         assert row['error_code'] == 'EXECUTOR_LOST'
         assert 'EXECUTOR_LOST' in SAFE_PUBLICATION_ERROR_CODES
+        assert row['may_send_at'] is not None
+
+    def test_pre_send_expiry_is_not_indeterminate(self, store, workspace):
+        """A local-only failure must not be reported as an unknown remote outcome."""
+        _approved(store, workspace)
+        lease = _claim(store, workspace, now=_past(60))
+        _expire(store, _past(0), _past(0))
+        row = _row(store, workspace, lease.publication_id)
+        assert row['state'] != 'INDETERMINATE'
+        assert row['remote_resource_id'] is None
 
     def test_expiry_never_returns_to_pending(self, store, workspace):
         _approved(store, workspace)
@@ -433,18 +466,36 @@ class TestStaleExpiry:
         assert _row(store, workspace, lease.publication_id)['fencing_token'] == 2
 
     def test_zombie_lease_is_fenced_out(self, store, workspace):
-        """A resumed executor may not heartbeat or persist any outcome."""
+        """A resumed executor may not heartbeat, cross the boundary, or persist any outcome."""
         _approved(store, workspace)
         lease = _claim(store, workspace, now=_past(60))
         _expire(store, _past(0), _past(0))
         assert _assert_owned(store, workspace, lease) is False
         assert _heartbeat(store, workspace, lease) is False
         with store.workspace_transaction(workspace) as repo:
+            assert repo.mark_publication_may_send(lease, now_func()) is False
             assert repo.complete_publication(lease, 42, 'https://example.test/p/42', now_func()) is False
             assert repo.fail_publication(lease, 'UNKNOWN', now_func()) is False
             assert repo.mark_publication_indeterminate(lease, 'TIMEOUT', now_func()) is False
         row = _row(store, workspace, lease.publication_id)
+        # Expired before the may-send boundary, so FAILED with no remote evidence.
+        assert row['state'] == 'FAILED'
+        assert row['error_code'] == 'EXECUTOR_LOST_BEFORE_SEND'
+        assert row['remote_resource_id'] is None
+        assert row['may_send_at'] is None
+
+    def test_zombie_lease_after_may_send_is_fenced_out(self, store, workspace):
+        """The same holds once the executor may already have created something."""
+        _approved(store, workspace)
+        lease = _claim(store, workspace, now=_past(60))
+        with store.workspace_transaction(workspace) as repo:
+            assert repo.mark_publication_may_send(lease, now_func()) is True
+        _expire(store, _past(0), _past(0))
+        with store.workspace_transaction(workspace) as repo:
+            assert repo.complete_publication(lease, 42, 'https://example.test/p/42', now_func()) is False
+        row = _row(store, workspace, lease.publication_id)
         assert row['state'] == 'INDETERMINATE'
+        assert row['error_code'] == 'EXECUTOR_LOST'
         assert row['remote_resource_id'] is None
 
     def test_fencing_token_cannot_be_lowered_or_erased(self, store, workspace):
@@ -674,7 +725,7 @@ class TestMigrationUpgrade:
         store = SQLiteStore(factory)
         with store.reader() as repo:
             assert [r[0] for r in repo._conn.execute('SELECT version FROM schema_migrations '
-                                                      'ORDER BY version')] == list(range(1, 12))
+                                                      'ORDER BY version')] == list(range(1, 13))
             rows = repo._conn.execute('SELECT * FROM task_publication_requests ORDER BY state').fetchall()
             assert [r['state'] for r in rows] == ['FAILED', 'INDETERMINATE', 'PENDING', 'SUCCEEDED']
             for row in rows:

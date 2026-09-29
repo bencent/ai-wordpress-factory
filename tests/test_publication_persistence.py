@@ -377,7 +377,7 @@ class TestRequestPublication:
             'publication_id', 'workspace_id', 'task_id', 'content_version_id', 'approved_run_id',
             'content_type', 'idempotency_key', 'state', 'remote_resource_id', 'remote_url',
             'error_code', 'created_at', 'updated_at', 'owner_id', 'fencing_token', 'claimed_at',
-            'heartbeat_at', 'target_id', 'target_configuration_version'}
+            'heartbeat_at', 'target_id', 'target_configuration_version', 'may_send_at'}
 
     def test_no_secret_or_credential_material_is_persisted(self, store, workspace):
         """The publication row records target IDENTITY only, never a credential.
@@ -744,11 +744,12 @@ class TestExistingContractsUnaffected:
             assert [e.type for e in repo.events_for_task(task.task_id)].count('TASK_APPROVED') == 1
         with store.workspace_transaction(workspace) as repo:
             assert repo.approve_content_version(task.task_id, version_id, now_func()) == (False, 'WRONG_TASK_STATE')
-        # A second publish request under a new key is a separate local record; 3A1
-        # deliberately does not decide the cross-key policy.
-        second, error = _request(store, workspace, task.task_id, version_id, 'another-key')
-        assert error is None
-        assert len(_rows(store, workspace)) == 2
+        # 3C5B locked decision A supersedes the 3A1 "undecided" note: a new key
+        # cannot mint a second lineage for the same approved version and target.
+        # Republish is a future explicit product feature, not a key change.
+        with pytest.raises(ValueError, match='PUBLICATION_ALREADY_EXISTS'):
+            _request(store, workspace, task.task_id, version_id, 'another-key')
+        assert len(_rows(store, workspace)) == 1
 
     def test_retry_and_revision_history_unaffected(self, store, workspace):
         lease_svc = LeaseService(store, clock=lambda: datetime.now(timezone.utc))
