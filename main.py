@@ -165,7 +165,7 @@ class AIWordPressFactory:
             self._workflow_id = str(uuid.uuid4())
             self._sequence = 0
             self._emit("workflow_started", task)
-            result = operation(self, task_id)
+            result = operation(self, task_id, revision_context)
             self._emit("checkpoint_produced", task)
             if task.status == TaskStatus.AWAITING_APPROVAL:
                 self._emit("awaiting_approval_reached", task)
@@ -216,7 +216,8 @@ class AIWordPressFactory:
         return task_id
 
     @observed_workflow
-    def run_workflow(self, task_id: str, observer: Optional[WorkflowObserver] = None) -> bool:
+    def run_workflow(self, task_id: str, revision_context=None,
+                     observer: Optional[WorkflowObserver] = None) -> bool:
         """執行工作流程。
         
         Production Workflow:
@@ -225,6 +226,9 @@ class AIWordPressFactory:
         
         Args:
             task_id: 任務 ID。
+            revision_context: Optional RevisionContext for REVISION runs.
+            observer: Accepted for the public workflow signature. Observation is
+                applied by _observe_workflow through the run's own observer.
         
         Returns:
             bool: 工作流程是否成功完成。
@@ -260,7 +264,7 @@ class AIWordPressFactory:
                 logger.error("WriterAgent 未配置")
                 return False
             with self._agent_step(task, "writer"):
-                draft_content = writer.write_content(task)
+                draft_content = writer.write_content(task, revision_context)
                 task.draft_content = draft_content
             logger.info(f"任務 {task_id} 撰寫完成")
             

@@ -201,20 +201,20 @@ class FactoryAdapter:
     def __call__(self, lease, cancelled):
         service = LeaseService(self.store)
         service.assert_active(lease)
+        revision_context = None
         with self.store.workspace_reader(lease.workspace_id) as repo:
             task, run = repo.get_task(lease.task_id), repo.get_run(lease.task_id, lease.run_id)
-        if task is None or run is None:
-            raise LeaseLost()
-        # Handle REVISION runs: resolve RevisionContext
-        revision_context = None
-        if run.run_mode == RunMode.REVISION:
-            revision_context = build_revision_context(repo, lease.workspace_id, run.run_id)
-        elif run.workflow_state is not None:
-            # Non-None workflow_state still unsupported (checkpoint/resume)
-            raise ValueError('Checkpoint resume is unavailable in Phase 8.1')
-        elif run.run_mode != RunMode.INITIAL:
-            # Unknown/unsupported run mode
-            raise ValueError(f'Unsupported run_mode: {run.run_mode}')
+            if task is None or run is None:
+                raise LeaseLost()
+            # Handle REVISION runs: resolve RevisionContext while the reader is open
+            if run.run_mode == RunMode.REVISION:
+                revision_context = build_revision_context(repo, lease.workspace_id, run.run_id)
+            elif run.workflow_state is not None:
+                # Non-None workflow_state still unsupported (checkpoint/resume)
+                raise ValueError('Checkpoint resume is unavailable in Phase 8.1')
+            elif run.run_mode != RunMode.INITIAL:
+                # Unknown/unsupported run mode
+                raise ValueError(f'Unsupported run_mode: {run.run_mode}')
 
         legacy = map_task(task)
         cfg = self.config_resolver(task.site_id)
