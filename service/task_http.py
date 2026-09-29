@@ -22,6 +22,7 @@ class RevisionConflict(ValueError): pass
 class RevisionIdempotencyConflict(ValueError): pass
 class PublishConflict(ValueError): pass
 class PublishIdempotencyConflict(ValueError): pass
+class PublishTargetUnavailable(ValueError): pass
 
 def cursor_encode(value):
     return base64.urlsafe_b64encode(json.dumps({'v':1,'position':value},separators=(',',':')).encode()).decode().rstrip('=') if value else None
@@ -281,6 +282,12 @@ class TaskHTTPService:
             if request is None:
                 if error_code == 'TASK_NOT_FOUND':
                     raise TaskNotFound()
+                # A missing publishing destination is a workspace configuration
+                # problem, not a problem with this task or this content version.
+                # Reporting it as "cannot be published" would send an operator
+                # looking at the wrong thing entirely.
+                if error_code == 'NO_ACTIVE_PUBLISHING_TARGET':
+                    raise PublishTargetUnavailable()
                 # A version the caller cannot see is reported exactly like a version
                 # that simply is not the approved one, so existence never leaks.
                 raise PublishConflict('Content version cannot be published')

@@ -5,18 +5,21 @@ from domain.contracts import Task, TaskRun, TaskEvent, ContentVersion, Status
 from domain.providers import Workspace, AIProviderConnection, AIInvocation
 from domain.preview import PreviewRecord, PreviewAsset, StoredPreview
 from domain.publication import PublicationLease, PublicationRequest
+from domain.publishing_target import PublishingTarget
 from .codec import encode_snapshot, decode_snapshot, record_to_mapping, record_from_mapping
 from .connection import PersistenceError, ConstraintViolation
 from .worker_repository import WorkerRepositoryMixin
 from .execution_repository import ExecutionRepositoryMixin
 from .provider_repository import ProviderRepositoryMixin
 from .publication_repository import PublicationRepositoryMixin
+from .publishing_target_repository import PublishingTargetRepositoryMixin
 from domain.execution import RunLease
 
 RECORDS = {Workspace: ("workspaces", "workspace_id"), AIProviderConnection: ("ai_provider_connections", "provider_connection_id"),
            AIInvocation: ("ai_invocations", "invocation_id"), Task: ("tasks", "task_id"), TaskRun: ("task_runs", "run_id"),
            TaskEvent: ("task_events", "event_id"), ContentVersion: ("content_versions", "content_version_id"),
-           PreviewRecord: ("preview_records", "preview_id"), PublicationRequest: ("task_publication_requests", "publication_id")}
+            PreviewRecord: ("preview_records", "preview_id"), PublicationRequest: ("task_publication_requests", "publication_id"),
+            PublishingTarget: ("publishing_targets", "target_id")}
 JSON_FIELDS = {"capabilities", "non_secret_configuration", "request_snapshot", "approval_policy_snapshot", "client_brand_snapshot",
                "workflow_state", "error", "metadata", "validation_result", "image_data",
                "seo_metadata", "optimization_report", "taxonomy", "aeo_data", "geo_data",
@@ -78,7 +81,8 @@ class Store(Protocol):
 
 
 class SQLiteInternalRepository(ProviderRepositoryMixin, ExecutionRepositoryMixin,
-                              PublicationRepositoryMixin, WorkerRepositoryMixin):
+                              PublicationRepositoryMixin, PublishingTargetRepositoryMixin,
+                              WorkerRepositoryMixin):
     """Unscoped execution/configuration access. Not an application query interface."""
     def __init__(self, connection, *, writable=False):
         self._conn = connection

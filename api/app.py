@@ -9,7 +9,7 @@ from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException
 from fastapi.concurrency import run_in_threadpool
 from domain.submission import ValidationError,IdempotencyConflict,ProfileError,TaskNotFound,PreviewNotFound,PreviewAssetUnavailable,ApprovalConflict
-from service.task_http import RetryConflict,RetryIdempotencyConflict,RevisionConflict,RevisionIdempotencyConflict,PublishConflict,PublishIdempotencyConflict
+from service.task_http import RetryConflict,RetryIdempotencyConflict,RevisionConflict,RevisionIdempotencyConflict,PublishConflict,PublishIdempotencyConflict,PublishTargetUnavailable
 from persistence.connection import PersistenceError
 from service.http_bootstrap import build_http_service
 
@@ -90,6 +90,8 @@ def create_app(service=None):
         ApprovalConflict:(409,'APPROVAL_CONFLICT','Approval cannot be completed.'),
         PublishIdempotencyConflict:(409,'IDEMPOTENCY_CONFLICT','Publication key conflicts with an existing request.'),
         PublishConflict:(409,'PUBLISH_CONFLICT','Task cannot be published in its current state.'),
+        # A configuration problem in the workspace, not a problem with the task.
+        PublishTargetUnavailable:(409,'PUBLISH_TARGET_UNAVAILABLE','No active publishing target is configured for this workspace.'),
         PersistenceError:(503,'SERVICE_UNAVAILABLE','Service is temporarily unavailable.')}
     async def domain_error(request,exc):
         mapping=next(v for k,v in mappings.items() if isinstance(exc,k))

@@ -5,6 +5,11 @@ from typing import Any
 from decimal import Decimal
 import re
 
+# The credential-reference grammar is shared with publishing targets so that a
+# reference cannot be valid for one domain and invalid for the other. The
+# pattern is unchanged; only its single definition moved.
+from domain.credential_reference import is_credential_reference
+
 # Stable UUID seed shared only by migration and the single-workspace compatibility path.
 DEFAULT_WORKSPACE_ID = "9bf33b12-307b-4e08-a9fb-b84d88e1c162"
 
@@ -114,7 +119,7 @@ class AIProviderConnection:
                 or any(not isinstance(c,Capability) for c in self.capabilities)
                 or len(set(self.capabilities)) != len(self.capabilities)):
             raise ContractError()
-        if not re.fullmatch(r'env:[A-Z][A-Z0-9_]{0,127}',self.credential_reference):
+        if not is_credential_reference(self.credential_reference):
             raise ContractError()
         if type(self.configuration_version) is not int or self.configuration_version < 1:
             raise ContractError()

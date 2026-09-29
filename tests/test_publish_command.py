@@ -19,6 +19,7 @@ from domain.publication import (PublishCommand, PublishCommandUnavailable, Publi
 from domain.submission import SubmissionProfile
 from domain.workspace import WorkspaceContext
 from persistence.codec import encode_snapshot
+from tests.publishing_target_helpers import ensure_target
 from persistence.connection import ConnectionFactory
 from persistence.migration_runner import migrate
 from persistence.repository import SQLiteStore
@@ -56,6 +57,17 @@ def store(tmp_path):
 @pytest.fixture
 def workspace(store):
     return default_workspace_context(store).workspace_id
+
+
+@pytest.fixture(autouse=True)
+def publishing_target(store, workspace):
+    """A NEW publication request must snapshot a target, so one must exist.
+
+    Autouse so tests that predate 3C4B and are not about targets keep their
+    original intent. ensure_target is a no-op when one already exists, because a
+    workspace may hold at most one ACTIVE target.
+    """
+    ensure_target(store, workspace)
 
 
 @pytest.fixture
@@ -648,7 +660,7 @@ class TestIsolationFromSideEffects:
 
     def test_no_migration_added(self):
         versions = sorted(int(p.name[:4]) for p in (ROOT / 'persistence/migrations').glob('*.sql'))
-        assert versions == list(range(1, 11))
+        assert versions == list(range(1, 12))
 
     def test_publication_table_has_no_marker_column(self):
         """The marker is derived, so duplicating it in storage is not required."""

@@ -5,6 +5,7 @@ The workspace ID is required, with no default-workspace fallback in persistence.
 """
 from domain.contracts import Task, TaskRun, TaskEvent, ContentVersion
 from domain.providers import Workspace, AIProviderConnection, Capability
+from domain.publishing_target import PublishingProviderType
 from domain.preview import StoredPreview
 from domain.publication import ApprovedVersion, PublicationRequest, PublicationState
 from persistence.connection import PersistenceError
@@ -87,6 +88,41 @@ class SQLiteWorkspaceRepository:
             "AND e.sequence_number>? ORDER BY e.sequence_number LIMIT ?",
             (self._workspace_id,task_id,after_sequence,limit))
         return [self._internal._decode(TaskEvent,row) for row in rows]
+
+    # -- Publishing targets -------------------------------------------------
+    # Workspace-scoped by construction. There is deliberately no unscoped target
+    # lookup on the application-facing repository: application code cannot ask
+    # "give me target X" without also proving it belongs to this workspace.
+
+    def get_publishing_target(self, target_id):
+        """One target in this workspace; a foreign workspace reads nothing.
+
+        DISABLED targets are returned. A publication that snapshotted this target
+        must still be able to resolve the exact destination it was bound to.
+        """
+        return self._internal.get_publishing_target(self._workspace_id, target_id)
+
+    def active_publishing_target(self, provider_type=PublishingProviderType.WORDPRESS):
+        """This workspace's single ACTIVE target, or None."""
+        return self._internal.active_publishing_target(self._workspace_id, provider_type)
+
+    def publishing_targets(self):
+        """All targets owned by this workspace."""
+        return self._internal.publishing_targets(self._workspace_id)
+
+    def add_publishing_target(self, target):
+        """Insert a target. A target naming another workspace is rejected."""
+        return self._internal.add_publishing_target(self._workspace_id, target)
+
+    def update_publishing_target_configuration(self, target_id, **changes):
+        """Versioned configuration change; increments configuration_version once."""
+        return self._internal.update_publishing_target_configuration(
+            self._workspace_id, target_id, **changes)
+
+    def update_publishing_target_status(self, target_id, status, updated_at):
+        """Status-only transition; deliberately does not move the version."""
+        return self._internal.update_publishing_target_status(
+            self._workspace_id, target_id, status, updated_at)
 
     def get_provider_connection(self, provider_connection_id):
         row = self._internal._conn.execute(

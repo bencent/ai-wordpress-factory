@@ -12,6 +12,7 @@ from domain.providers import Workspace
 from domain.submission import SubmissionProfile
 from domain.workspace import WorkspaceContext
 from persistence.codec import encode_snapshot
+from tests.publishing_target_helpers import ensure_target
 from persistence.connection import ConnectionFactory, ConstraintViolation, PersistenceError
 from persistence.migration_runner import migrate
 from persistence.repository import SQLiteStore
@@ -35,6 +36,17 @@ def workspace(store):
     return default_workspace_context(store).workspace_id
 
 
+@pytest.fixture(autouse=True)
+def publishing_target(store, workspace):
+    """A NEW publication request must snapshot a target, so one must exist.
+
+    Autouse so tests that predate 3C4B and are not about targets keep their
+    original intent. ensure_target is a no-op when one already exists, because a
+    workspace may hold at most one ACTIVE target.
+    """
+    ensure_target(store, workspace)
+
+
 @pytest.fixture
 def other_workspace(store):
     """A second ACTIVE workspace with its own provider, for isolation tests."""
@@ -47,6 +59,11 @@ def other_workspace(store):
     with store.transaction() as internal:
         internal.add(replace(template, provider_connection_id=str(uuid4()),
                              workspace_id=context.workspace_id))
+    # A second workspace publishes to its OWN target. Isolation is part of what
+    # this fixture is for, and a workspace without a destination cannot create
+    # publication intent at all.
+    ensure_target(store, context.workspace_id, base_url='https://other-site.example',
+                  credential_reference='env:AIWF_TEST_OTHER_WORDPRESS_PASSWORD')
     return context.workspace_id
 
 
@@ -355,11 +372,38 @@ class TestRequestPublication:
     def test_no_article_content_is_duplicated(self, store, workspace):
         task, version_id, _ = _approved_task(store, workspace)
         _request(store, workspace, task.task_id, version_id)
-        assert set(_rows(store, workspace)[0].keys()) == {
+        columns = set(_rows(store, workspace)[0].keys())
+        assert columns == {
             'publication_id', 'workspace_id', 'task_id', 'content_version_id', 'approved_run_id',
             'content_type', 'idempotency_key', 'state', 'remote_resource_id', 'remote_url',
             'error_code', 'created_at', 'updated_at', 'owner_id', 'fencing_token', 'claimed_at',
-            'heartbeat_at'}
+            'heartbeat_at', 'target_id', 'target_configuration_version'}
+
+    def test_no_secret_or_credential_material_is_persisted(self, store, workspace):
+        """The publication row records target IDENTITY only, never a credential.
+
+        A publication may outlive a credential rotation and may be inspected by
+        any operator with read access, so this row must not be able to hold the
+        secret, and must not even name the credential reference that would lead
+        to it. Target identity is enough to detect drift; the secret is resolved
+        from the target at execution time.
+        """
+        task, version_id, _ = _approved_task(store, workspace)
+        with store.workspace_reader(workspace) as repo:
+            target = repo.active_publishing_target()
+        assert target is not None
+        request, _ = _request(store, workspace, task.task_id, version_id)
+        assert request.target_id == target.target_id
+
+        row = dict(_rows(store, workspace)[0])
+        for column, value in row.items():
+            assert target.credential_reference != value
+            assert 'env:' not in str(value)
+            assert target.base_url != value
+            assert target.username != value
+        for forbidden in ('application_password', 'password', 'secret', 'token',
+                          'credential_reference', 'base_url', 'username'):
+            assert forbidden not in row
 
     def test_execution_lease_fields_absent_before_claim(self, store, workspace):
         task, version_id, _ = _approved_task(store, workspace)

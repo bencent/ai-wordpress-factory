@@ -158,6 +158,14 @@ class PublicationRequest:
     fencing_token: int | None = None
     claimed_at: str | None = None
     heartbeat_at: str | None = None
+    # Request-time snapshot of the publishing target this publication is bound to.
+    # Both are nullable ONLY for rows created before publishing targets existed;
+    # such rows are non-executable by contract and can never be claimed.
+    # Deliberately absent: base_url, username, credential_reference, and every
+    # secret. The snapshot records WHICH target and WHICH version of it, so drift
+    # is detectable; the credential is resolved later from the target row.
+    target_id: str | None = None
+    target_configuration_version: int | None = None
 
     def __post_init__(self):
         _validate_uuid(self.publication_id, "publication_id")
@@ -197,6 +205,20 @@ class PublicationRequest:
         if self.state is PublicationState.IN_PROGRESS:
             if None in (self.owner_id, self.fencing_token, self.claimed_at, self.heartbeat_at):
                 raise ValueError("an IN_PROGRESS publication requires a complete execution lease")
+            # Execution implies a bound destination. A snapshot-less row may exist
+            # (it predates publishing targets) but it may never be executed, so it
+            # can never be in flight.
+            if self.target_id is None:
+                raise ValueError("an IN_PROGRESS publication requires a target snapshot")
+        # A snapshot is all-or-nothing: a target id with no version cannot be
+        # checked for drift, and a version with no target identifies nothing.
+        if (self.target_id is None) != (self.target_configuration_version is None):
+            raise ValueError("target_id and target_configuration_version are both required or both absent")
+        if self.target_id is not None:
+            _validate_non_empty_str(self.target_id, "target_id")
+            if (type(self.target_configuration_version) is not int
+                    or self.target_configuration_version < 1):
+                raise ValueError("target_configuration_version must be a positive int")
 
 
 # -- Reconciliation identity -------------------------------------------------

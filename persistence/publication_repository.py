@@ -4,6 +4,7 @@ from uuid import uuid4
 from domain.contracts import ContentVersion, Status
 from domain.publication import (ApprovedVersion, PublicationLease, PublicationRequest,
                                 PublicationState, SAFE_PUBLICATION_ERROR_CODES)
+from domain.publishing_target import PublishingProviderType
 from persistence.codec import decode_snapshot
 from persistence.connection import PersistenceError
 
@@ -75,10 +76,26 @@ class PublicationRepositoryMixin:
         task or content version, and PersistenceError when approval history is
         damaged. The caller supplies content_version_id so a stale or guessed
         version is rejected rather than silently redirected.
+
+        The workspace's ACTIVE publishing target is resolved HERE, at request time,
+        and its identity plus configuration_version are snapshotted onto the row
+        atomically with the request. This is the point of the snapshot: an executor
+        must never re-resolve "whatever target is active now", because a
+        publication recorded for site A would then be silently sent to site B if an
+        administrator repointed the workspace in between.
+
+        Only target identity is recorded. base_url, username, credential_reference
+        and the secret itself are never copied onto the publication: the snapshot
+        names the target, and the credential is resolved from the target at
+        execution time.
         """
         self._write()
         existing = self._find_publication(workspace_id, idempotency_key)
         if existing is not None:
+            # A replay returns the ORIGINAL row untouched. Re-resolving the active
+            # target here would rewrite a durable intent because workspace
+            # configuration changed after the fact, which is precisely the drift
+            # the snapshot exists to prevent.
             if existing.task_id != task_id or existing.content_version_id != content_version_id:
                 raise ValueError('IDEMPOTENCY_CONFLICT')
             return (existing, None)
@@ -101,11 +118,31 @@ class PublicationRepositoryMixin:
             return None, 'VERSION_NOT_FOUND'
         if approved.content_version_id != content_version_id:
             return None, 'VERSION_MISMATCH'
+        # Request-time target snapshot, read inside this same write transaction so
+        # the target cannot change between resolution and insert. The composite
+        # foreign key independently proves the target belongs to this workspace.
+        #
+        # The filter is on provider_type (WORDPRESS), NOT on the content type of
+        # the article. POST/PAGE selects which REST collection the create uses;
+        # it does not select the destination. One WordPress target serves both.
+        target = self._conn.execute(
+            "SELECT t.target_id,t.provider_type,t.configuration_version FROM publishing_targets t "
+            "JOIN workspaces w ON w.workspace_id=t.workspace_id "
+            "WHERE t.workspace_id=? AND t.provider_type=? AND t.status='ACTIVE' "
+            "AND w.status='ACTIVE'",
+            (workspace_id, PublishingProviderType.WORDPRESS.value)).fetchone()
+        if target is None:
+            # No destination is a configuration problem, not a remote failure. It
+            # is reported before any row exists, so nothing is recorded that could
+            # later be claimed and executed against an unknown target.
+            return None, 'NO_ACTIVE_PUBLISHING_TARGET'
         request = PublicationRequest(publication_id=str(uuid4()), workspace_id=workspace_id,
                                      task_id=task_id, content_version_id=approved.content_version_id,
                                      approved_run_id=approved.run_id, content_type=approved.content_type,
                                      idempotency_key=idempotency_key, state=PublicationState.PENDING,
-                                     created_at=now, updated_at=now)
+                                     created_at=now, updated_at=now,
+                                     target_id=target['target_id'],
+                                     target_configuration_version=target['configuration_version'])
         self.add(request)
         return self.get(PublicationRequest, request.publication_id), None
 
@@ -159,6 +196,11 @@ class PublicationRepositoryMixin:
             "SELECT p.publication_id,p.task_id,p.fencing_token FROM task_publication_requests p "
             "JOIN workspaces w ON w.workspace_id=p.workspace_id "
             "WHERE p.workspace_id=? AND p.state='PENDING' AND w.status='ACTIVE' "
+            # A row with no target snapshot predates publishing targets. It is
+            # non-executable by contract: the database refuses to move it to
+            # IN_PROGRESS without a target, so selecting it here would only turn
+            # a clean "nothing to do" into a constraint error.
+            "AND p.target_id IS NOT NULL "
             "ORDER BY p.created_at,p.publication_id LIMIT 1", (workspace_id,)).fetchone()
         if row is None:
             return None

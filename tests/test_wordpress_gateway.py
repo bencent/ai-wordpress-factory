@@ -205,6 +205,21 @@ def gateway_code(module: str) -> str:
     return strip_comments_and_docstrings((ROOT / module).read_text(encoding="utf-8"))
 
 
+def migration_versions() -> list[int]:
+    """Applied schema versions from a throwaway database."""
+    import tempfile
+
+    from persistence.connection import ConnectionFactory
+    from persistence.migration_runner import migrate
+
+    with tempfile.TemporaryDirectory() as directory:
+        factory = ConnectionFactory(Path(directory) / "schema.sqlite3")
+        migrate(factory)
+        with factory.connection() as conn:
+            return [row[0] for row in conn.execute(
+                "SELECT version FROM schema_migrations ORDER BY version")]
+
+
 # -- 1-2: endpoint mapping --------------------------------------------------
 
 
@@ -1324,11 +1339,26 @@ class TestNoSchemaMigrationRequired:
         sql = (ROOT / "persistence" / "migrations" / "0010_publication_claim.sql").read_text()
         assert "NEW.content_type IS NOT OLD.content_type" in sql
 
-    def test_no_migration_was_added_by_this_hotfix(self):
-        import subprocess
-        result = subprocess.run(["git", "status", "--porcelain", "--", "persistence/"],
-                                cwd=ROOT, capture_output=True, text=True)
-        assert result.stdout.strip() == ""
+    def test_no_migration_was_added_by_the_gateway(self):
+        """3C3 added no migration; 3C4B added 0011 for publishing targets.
+
+        The assertion is now that the gateway's own slice contributed no schema,
+        rather than that the newest migration is 0010. Pinning the number would
+        make an unrelated, correct migration look like a regression.
+        """
+        versions = migration_versions()
+        assert 11 in versions  # 3C4B: publishing_targets + target snapshot
+        assert 10 in versions  # 3C1: publication claim/fencing
+        sql = (ROOT / "persistence" / "migrations" / "0011_publishing_targets.sql").read_text()
+        # 0011 is the target/snapshot migration. It must not be a gateway concern.
+        # Line comments are stripped so prose about "publication requests" is not
+        # mistaken for a reference. "requests" itself is not a banned token here
+        # because the publication table is named task_publication_requests; what
+        # matters is that the schema cannot reach the network.
+        code = "\n".join(line.split("--", 1)[0] for line in sql.splitlines())
+        for banned in ("WordPressGateway", "http.client", "urllib", "socket",
+                       "wp-json", "Authorization"):
+            assert banned not in code, f"0011 references {banned}"
 
     def test_persisted_identity_is_interpretable_from_the_existing_row(self):
         """(publication.content_type, remote_resource_id) reconstructs identity."""

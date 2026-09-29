@@ -21,6 +21,7 @@ from persistence.repository import SQLiteStore
 from service.execution import build_version, now as now_func
 from service.submission import ScopedTaskSubmissionService
 from service.task_http import TaskHTTPService
+from tests.publishing_target_helpers import ensure_target
 from service.workspace_bootstrap import default_workspace_context
 from worker.claiming import LeaseService
 
@@ -66,6 +67,17 @@ def other_workspace(store):
         internal.add(replace(template, provider_connection_id=str(uuid4()),
                              workspace_id=context.workspace_id))
     return context.workspace_id
+
+
+@pytest.fixture(autouse=True)
+def publishing_target(store, workspace):
+    """Every new publication request snapshots a target, so one must exist.
+
+    Autouse because the 3C4B contract makes a target mandatory for any NEW
+    publication request. Tests that assert target-specific behaviour create
+    their own and this one is a no-op for them.
+    """
+    ensure_target(store, workspace)
 
 
 @pytest.fixture
