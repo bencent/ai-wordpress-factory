@@ -126,11 +126,23 @@ def _request(store, workspace_id, task_id, version_id, key='pub-1'):
         return repo.request_publication(task_id, version_id, key, now_func())
 
 
+def _claim(store, publication_id, owner='lifecycle-owner', now=None):
+    """Enter IN_PROGRESS the way production does: through the durable claim."""
+    with store.transaction() as repo:
+        row = repo._conn.execute('SELECT workspace_id FROM task_publication_requests WHERE publication_id=?',
+                                 (publication_id,)).fetchone()
+        changed = repo._conn.execute(
+            "UPDATE task_publication_requests SET state='IN_PROGRESS',owner_id=?,fencing_token=1,"
+            "claimed_at=?,heartbeat_at=?,updated_at=? WHERE publication_id=? AND state='PENDING'",
+            (owner, now or now_func(), now or now_func(), now or now_func(), publication_id)).rowcount
+    assert changed == 1, f'could not claim {publication_id} in workspace {row["workspace_id"]}'
+
+
 def _drive_to(store, publication_id, state):
     """Walk a request to `state` using only transitions the contract allows."""
     if state == 'PENDING':
         return
-    _set_state(store, publication_id, 'IN_PROGRESS')
+    _claim(store, publication_id)
     if state == 'IN_PROGRESS':
         return
     columns = {'remote_resource_id': 123} if state == 'SUCCEEDED' else {'error_code': 'TIMEOUT'}
@@ -337,7 +349,7 @@ class TestRequestPublication:
         assert (request.remote_resource_id, request.remote_url, request.error_code) == (None, None, None)
         row = _rows(store, workspace)[0]
         assert row['remote_resource_id'] is None and row['remote_url'] is None
-        assert not any(any(word in key for word in ('password', 'secret', 'token', 'credential'))
+        assert not any(any(word in key for word in ('password', 'secret', 'credential', 'app_password'))
                        for key in row.keys())
 
     def test_no_article_content_is_duplicated(self, store, workspace):
@@ -346,7 +358,14 @@ class TestRequestPublication:
         assert set(_rows(store, workspace)[0].keys()) == {
             'publication_id', 'workspace_id', 'task_id', 'content_version_id', 'approved_run_id',
             'content_type', 'idempotency_key', 'state', 'remote_resource_id', 'remote_url',
-            'error_code', 'created_at', 'updated_at'}
+            'error_code', 'created_at', 'updated_at', 'owner_id', 'fencing_token', 'claimed_at',
+            'heartbeat_at'}
+
+    def test_execution_lease_fields_absent_before_claim(self, store, workspace):
+        task, version_id, _ = _approved_task(store, workspace)
+        request, _ = _request(store, workspace, task.task_id, version_id)
+        assert (request.owner_id, request.fencing_token, request.claimed_at,
+                request.heartbeat_at) == (None, None, None, None)
 
     def test_task_status_is_not_advanced(self, store, workspace):
         task, version_id, _ = _approved_task(store, workspace)
@@ -499,7 +518,7 @@ class TestImmutabilityAndStateContract:
         """The immutability split leaves room for a future executor."""
         task, version_id, _ = _approved_task(store, workspace)
         request, _ = _request(store, workspace, task.task_id, version_id)
-        _set_state(store, request.publication_id, 'IN_PROGRESS')
+        _drive_to(store, request.publication_id, 'IN_PROGRESS')
         _set_state(store, request.publication_id, 'SUCCEEDED',
                    remote_resource_id=123, remote_url='https://example.test/p/123')
         with store.workspace_reader(workspace) as repo:
@@ -538,7 +557,7 @@ class TestImmutabilityAndStateContract:
     def test_indeterminate_cannot_be_replayed(self, store, workspace, target):
         task, version_id, _ = _approved_task(store, workspace, f'replay-{target}')
         request, _ = _request(store, workspace, task.task_id, version_id)
-        _set_state(store, request.publication_id, 'IN_PROGRESS')
+        _drive_to(store, request.publication_id, 'IN_PROGRESS')
         _set_state(store, request.publication_id, 'INDETERMINATE', error_code='TIMEOUT')
         with store.workspace_reader(workspace) as repo:
             stored = repo.get_publication(request.publication_id)
@@ -554,7 +573,7 @@ class TestImmutabilityAndStateContract:
         """Resolution records what was later learned; it is not a retry."""
         task, version_id, _ = _approved_task(store, workspace, 'resolve-failed')
         request, _ = _request(store, workspace, task.task_id, version_id)
-        _set_state(store, request.publication_id, 'IN_PROGRESS')
+        _drive_to(store, request.publication_id, 'IN_PROGRESS')
         _set_state(store, request.publication_id, 'INDETERMINATE', error_code='TIMEOUT')
         _set_state(store, request.publication_id, 'FAILED', error_code='REMOTE_NOT_FOUND')
         with store.workspace_reader(workspace) as repo:
@@ -567,7 +586,7 @@ class TestImmutabilityAndStateContract:
         """Resolution to success still requires real remote evidence."""
         task, version_id, _ = _approved_task(store, workspace, 'resolve-succeeded')
         request, _ = _request(store, workspace, task.task_id, version_id)
-        _set_state(store, request.publication_id, 'IN_PROGRESS')
+        _drive_to(store, request.publication_id, 'IN_PROGRESS')
         _set_state(store, request.publication_id, 'INDETERMINATE', error_code='TIMEOUT')
         with pytest.raises(ConstraintViolation):
             _set_state(store, request.publication_id, 'SUCCEEDED')
@@ -595,7 +614,7 @@ class TestImmutabilityAndStateContract:
         """FAILED is a confirmed no-remote outcome and is terminal, not replayable."""
         task, version_id, _ = _approved_task(store, workspace)
         request, _ = _request(store, workspace, task.task_id, version_id)
-        _set_state(store, request.publication_id, 'IN_PROGRESS')
+        _drive_to(store, request.publication_id, 'IN_PROGRESS')
         _set_state(store, request.publication_id, 'FAILED', error_code='AUTHENTICATION')
         with store.workspace_reader(workspace) as repo:
             stored = repo.get_publication(request.publication_id)
@@ -609,7 +628,7 @@ class TestImmutabilityAndStateContract:
         """Non-state outcome columns stay writable without a transition."""
         task, version_id, _ = _approved_task(store, workspace)
         request, _ = _request(store, workspace, task.task_id, version_id)
-        _set_state(store, request.publication_id, 'IN_PROGRESS')
+        _drive_to(store, request.publication_id, 'IN_PROGRESS')
         _set_state(store, request.publication_id, 'IN_PROGRESS', error_code='ATTEMPTED')
         with store.workspace_reader(workspace) as repo:
             stored = repo.get_publication(request.publication_id)
@@ -619,7 +638,7 @@ class TestImmutabilityAndStateContract:
     def test_confirmed_success_requires_remote_id(self, store, workspace):
         task, version_id, _ = _approved_task(store, workspace)
         request, _ = _request(store, workspace, task.task_id, version_id)
-        _set_state(store, request.publication_id, 'IN_PROGRESS')
+        _drive_to(store, request.publication_id, 'IN_PROGRESS')
         with pytest.raises(ConstraintViolation):
             _set_state(store, request.publication_id, 'SUCCEEDED')
 
@@ -627,7 +646,7 @@ class TestImmutabilityAndStateContract:
     def test_remote_id_requires_confirmed_success(self, store, workspace, state):
         task, version_id, _ = _approved_task(store, workspace, f'remote-{state}')
         request, _ = _request(store, workspace, task.task_id, version_id)
-        _set_state(store, request.publication_id, 'IN_PROGRESS')
+        _drive_to(store, request.publication_id, 'IN_PROGRESS')
         with pytest.raises(ConstraintViolation):
             _set_state(store, request.publication_id, state, remote_resource_id=123)
         with store.workspace_reader(workspace) as repo:

@@ -294,3 +294,35 @@ class SQLiteWorkspaceRepository:
     def publications_for_task(self, task_id):
         """List this workspace's publication requests for a task, in creation order."""
         return self._internal.publications_for_task(self._workspace_id, task_id)
+
+    def claim_publication(self, owner_id, now):
+        """Take exclusive execution ownership of one PENDING publication here.
+
+        Returns a PublicationLease or None. The lease is a frozen value, so no
+        transaction stays open across any later external call.
+        """
+        return self._internal.claim_publication(self._workspace_id, owner_id, now)
+
+    def assert_publication_ownership(self, lease):
+        """True only while this exact lease still owns its IN_PROGRESS publication."""
+        return self._internal.assert_publication_ownership(lease)
+
+    def heartbeat_publication(self, lease, now):
+        """Refresh an owned lease. Never changes state; false means the lease is stale."""
+        return self._internal.heartbeat_publication(lease, now)
+
+    def complete_publication(self, lease, remote_resource_id, remote_url, now):
+        """Record a confirmed external success under an active lease."""
+        return self._internal.complete_publication(lease, remote_resource_id, remote_url, now)
+
+    def fail_publication(self, lease, error_code, now):
+        """Record a confirmed failure that created no remote resource."""
+        return self._internal.fail_publication(lease, error_code, now)
+
+    def mark_publication_indeterminate(self, lease, error_code, now):
+        """Record that the external outcome cannot be proven either way."""
+        return self._internal.mark_publication_indeterminate(lease, error_code, now)
+
+    def expire_stale_publications(self, cutoff, now):
+        """Fence out silent leases as INDETERMINATE. Never reclaims to PENDING."""
+        return self._internal.expire_stale_publications(cutoff, now)

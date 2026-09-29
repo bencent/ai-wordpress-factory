@@ -23,6 +23,44 @@ class PublicationState(str, Enum):
     INDETERMINATE = "INDETERMINATE"
 
 
+TERMINAL_STATES = frozenset({PublicationState.SUCCEEDED, PublicationState.FAILED,
+                             PublicationState.INDETERMINATE})
+
+# Only these codes may be persisted on a publication. They name a classified
+# outcome, never a message, a stack trace, or a credential.
+SAFE_PUBLICATION_ERROR_CODES = frozenset({
+    'AUTHENTICATION', 'PERMISSION', 'RATE_LIMIT', 'TIMEOUT', 'UNAVAILABLE',
+    'INVALID_REQUEST', 'INVALID_RESPONSE', 'CANCELLED', 'UNKNOWN',
+    'EXECUTOR_LOST', 'EXECUTOR_FAILED', 'EXECUTOR_INCOMPLETE',
+})
+
+
+@dataclass(frozen=True)
+class PublicationLease:
+    """Proof that one executor currently owns one publication execution.
+
+    A frozen value carrying only the identity needed to re-assert ownership. It is
+    deliberately separate from RunLease: publication execution is not a TaskRun and
+    has no run mode, attempt, or task status coupling. It holds no WordPress
+    credential and no article payload.
+    """
+    publication_id: str
+    task_id: str
+    workspace_id: str
+    owner_id: str
+    fencing_token: int
+
+    def __post_init__(self):
+        for field in ('publication_id', 'task_id', 'workspace_id', 'owner_id'):
+            value = getattr(self, field)
+            if not isinstance(value, str):
+                raise ValueError(f"{field} must be string")
+            if not value or value != value.strip():
+                raise ValueError(f"{field} must be non-empty string without whitespace")
+        if type(self.fencing_token) is not int or self.fencing_token < 0:
+            raise ValueError("fencing_token must be a non-negative int")
+
+
 @dataclass(frozen=True, kw_only=True)
 class ApprovedVersion:
     """The exact approved content version and the run that produced it.
@@ -106,6 +144,10 @@ class PublicationRequest:
     remote_resource_id: int | None = None
     remote_url: str | None = None
     error_code: str | None = None
+    owner_id: str | None = None
+    fencing_token: int | None = None
+    claimed_at: str | None = None
+    heartbeat_at: str | None = None
 
     def __post_init__(self):
         _validate_uuid(self.publication_id, "publication_id")
@@ -134,3 +176,14 @@ class PublicationRequest:
             raise ValueError("remote_resource_id requires a confirmed SUCCEEDED publication")
         if self.state is PublicationState.SUCCEEDED and self.remote_resource_id is None:
             raise ValueError("a confirmed publication requires remote_resource_id")
+        # Execution lease shape, mirroring the storage invariant.
+        if self.fencing_token is not None:
+            if type(self.fencing_token) is not int or self.fencing_token < 0:
+                raise ValueError("fencing_token must be a non-negative int")
+        for field in ('owner_id', 'claimed_at', 'heartbeat_at'):
+            value = getattr(self, field)
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                raise ValueError(f"{field} must be a non-empty string when present")
+        if self.state is PublicationState.IN_PROGRESS:
+            if None in (self.owner_id, self.fencing_token, self.claimed_at, self.heartbeat_at):
+                raise ValueError("an IN_PROGRESS publication requires a complete execution lease")

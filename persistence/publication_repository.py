@@ -1,12 +1,20 @@
 """Explicit publish intent bound to approved history. Performs no external call."""
 from uuid import uuid4
 
-from domain.contracts import ContentVersion, Status, Task
-from domain.publication import ApprovedVersion, PublicationRequest, PublicationState
+from domain.contracts import ContentVersion, Status
+from domain.publication import (ApprovedVersion, PublicationLease, PublicationRequest,
+                                PublicationState, SAFE_PUBLICATION_ERROR_CODES)
 from persistence.codec import decode_snapshot
 from persistence.connection import PersistenceError
 
 APPROVAL_EVENT = 'TASK_APPROVED'
+EXECUTOR_LOST = 'EXECUTOR_LOST'
+
+_CLAIM_PREDICATE = ("publication_id=? AND workspace_id=? AND owner_id=? "
+                    "AND fencing_token=? AND state='IN_PROGRESS'")
+_CLAIM_ARGUMENTS = 'publication_id,workspace_id,owner_id,fencing_token'
+_CLAIM_WRITES = ('UPDATE task_publication_requests SET heartbeat_at=?,updated_at=? '
+                 f'WHERE {_CLAIM_PREDICATE}')
 
 
 class PublicationRepositoryMixin:
@@ -132,3 +140,128 @@ class PublicationRepositoryMixin:
         if request is None:
             return None
         return (request.task_id, request.content_version_id, request.publication_id, request.state)
+
+    # -- Execution ownership -------------------------------------------------
+    # Reuses the TaskRun worker concepts (CAS claim, owner identity, monotonic
+    # fencing token, heartbeat, stale expiry) without any TaskRun, RunMode,
+    # task status, or task_events coupling. No method here performs external I/O.
+
+    def claim_publication(self, workspace_id, owner_id, now):
+        """Take exclusive execution ownership of one PENDING publication.
+
+        Returns a PublicationLease, or None when nothing is claimable. The caller
+        receives data only: there is no callback, context manager, or lazy handle,
+        so a future network call cannot happen inside this transaction. The lease
+        is committed with the caller's transaction before this value is usable.
+        """
+        self._write()
+        row = self._conn.execute(
+            "SELECT p.publication_id,p.task_id,p.fencing_token FROM task_publication_requests p "
+            "JOIN workspaces w ON w.workspace_id=p.workspace_id "
+            "WHERE p.workspace_id=? AND p.state='PENDING' AND w.status='ACTIVE' "
+            "ORDER BY p.created_at,p.publication_id LIMIT 1", (workspace_id,)).fetchone()
+        if row is None:
+            return None
+        token = (row['fencing_token'] or 0) + 1
+        changed = self._conn.execute(
+            "UPDATE task_publication_requests SET state='IN_PROGRESS',owner_id=?,fencing_token=?,"
+            "claimed_at=?,heartbeat_at=?,updated_at=? "
+            "WHERE publication_id=? AND workspace_id=? AND state='PENDING'",
+            (owner_id, token, now, now, now, row['publication_id'], workspace_id)).rowcount
+        if changed != 1:
+            # Another executor won the compare-and-swap inside the same window.
+            return None
+        return PublicationLease(publication_id=row['publication_id'], task_id=row['task_id'],
+                                workspace_id=workspace_id, owner_id=owner_id, fencing_token=token)
+
+    def owned_publication(self, lease):
+        """Read the row a lease claims to own. Read-only; safe on a reader."""
+        return self._conn.execute(
+            "SELECT p.* FROM task_publication_requests p "
+            "JOIN workspaces w ON w.workspace_id=p.workspace_id "
+            f"WHERE p.publication_id=? AND p.workspace_id=? AND p.task_id=? AND p.owner_id=? "
+            "AND p.fencing_token=? AND p.state='IN_PROGRESS' AND w.status='ACTIVE'",
+            (lease.publication_id, lease.workspace_id, lease.task_id, lease.owner_id,
+             lease.fencing_token)).fetchone()
+
+    def assert_publication_ownership(self, lease):
+        """True only while this exact lease still owns an IN_PROGRESS publication."""
+        return self.owned_publication(lease) is not None
+
+    def heartbeat_publication(self, lease, now):
+        """Refresh the lease. Never changes state; false means the lease is stale."""
+        self._write()
+        if self.owned_publication(lease) is None:
+            return False
+        return self._conn.execute(
+            _CLAIM_WRITES, (now, now, lease.publication_id, lease.workspace_id,
+                            lease.owner_id, lease.fencing_token)).rowcount == 1
+
+    def complete_publication(self, lease, remote_resource_id, remote_url, now):
+        """Record a confirmed external success. Requires positive remote evidence."""
+        if type(remote_resource_id) is not int or remote_resource_id <= 0:
+            raise ValueError('remote_resource_id must be a positive int')
+        if remote_url is not None and (type(remote_url) is not str or not remote_url.strip()):
+            raise ValueError('remote_url must be a non-empty string when present')
+        return self._finish_publication(lease, "SET state='SUCCEEDED',remote_resource_id=?,"
+                                        "remote_url=?,error_code=NULL,updated_at=?",
+                                        (remote_resource_id, remote_url, now))
+
+    def fail_publication(self, lease, error_code, now):
+        """Record a confirmed failure that created no remote resource."""
+        self._check_publication_error_code(error_code)
+        return self._finish_publication(lease, "SET state='FAILED',error_code=?,updated_at=?",
+                                        (error_code, now))
+
+    def mark_publication_indeterminate(self, lease, error_code, now):
+        """Record that the external outcome cannot be proven either way."""
+        self._check_publication_error_code(error_code)
+        return self._finish_publication(lease, "SET state='INDETERMINATE',error_code=?,updated_at=?",
+                                        (error_code, now))
+
+    def _finish_publication(self, lease, assignments, values):
+        self._write()
+        if self.owned_publication(lease) is None:
+            return False
+        changed = self._conn.execute(
+            f"UPDATE task_publication_requests {assignments} WHERE {_CLAIM_PREDICATE}",
+            (*values, lease.publication_id, lease.workspace_id, lease.owner_id,
+             lease.fencing_token)).rowcount
+        if changed != 1:
+            return False
+        # Confirm the write landed in a decodable state before reporting success.
+        self._decode(PublicationRequest, self._conn.execute(
+            'SELECT * FROM task_publication_requests WHERE publication_id=?',
+            (lease.publication_id,)).fetchone())
+        return True
+
+    def expire_stale_publications(self, cutoff, now):
+        """Fence out executors whose lease went silent, as outcome-unknown.
+
+        IN_PROGRESS becomes INDETERMINATE and the fencing token is incremented, so
+        a resumed executor can never persist an outcome. It never returns to
+        PENDING: the system cannot distinguish "crashed before the call" from
+        "crashed after WordPress accepted the request", so both are ambiguous.
+        """
+        self._write()
+        rows = self._conn.execute(
+            "SELECT publication_id,owner_id,fencing_token FROM task_publication_requests "
+            "WHERE state='IN_PROGRESS' AND COALESCE(heartbeat_at,claimed_at) <= ?",
+            (cutoff,)).fetchall()
+        expired = 0
+        for row in rows:
+            changed = self._conn.execute(
+                "UPDATE task_publication_requests SET state='INDETERMINATE',error_code=?,"
+                "fencing_token=fencing_token+1,updated_at=? "
+                "WHERE publication_id=? AND state='IN_PROGRESS' AND fencing_token=? "
+                "AND owner_id IS ? AND COALESCE(heartbeat_at,claimed_at) <= ?",
+                (EXECUTOR_LOST, now, row['publication_id'], row['fencing_token'],
+                 row['owner_id'], cutoff)).rowcount
+            expired += changed
+        return expired
+
+    @staticmethod
+    def _check_publication_error_code(error_code):
+        """Reject anything that is not a classified code, mirroring fail_run."""
+        if error_code not in SAFE_PUBLICATION_ERROR_CODES:
+            raise ValueError('Unsupported safe publication error code')
