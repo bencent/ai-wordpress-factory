@@ -143,6 +143,14 @@ class ExecutionRepositoryMixin:
             return False, 'WRONG_TASK_STATE'
 
         # 6. Append exactly one TASK_APPROVED TaskEvent
+        # task_events enforces FOREIGN KEY(task_id, run_id, attempt) against
+        # task_runs, so the attempt must come from the persisted producing run.
+        # ContentVersion.version_number is a separate counter and diverges from
+        # TaskRun.attempt whenever a run is failed or lost without producing a
+        # version, so it must never be used here.
+        producing_run = self.get(TaskRun, cv.run_id)
+        if producing_run is None or producing_run.task_id != task_id:
+            raise PersistenceError('Approved content version has no producing run')
         from uuid import uuid4
         from domain.contracts import TaskEvent
         event_id = str(uuid4())
@@ -152,8 +160,8 @@ class ExecutionRepositoryMixin:
             event_id=event_id,
             event_key=f'approved:{task_id}:{content_version_id}',
             task_id=task_id,
-            run_id=cv.run_id,
-            attempt=cv.version_number,
+            run_id=producing_run.run_id,
+            attempt=producing_run.attempt,
             sequence_number=sequence,
             type='TASK_APPROVED',
             actor='system',
