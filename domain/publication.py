@@ -38,6 +38,10 @@ SAFE_PUBLICATION_ERROR_CODES = frozenset({
     'AUTHENTICATION', 'PERMISSION', 'RATE_LIMIT', 'TIMEOUT', 'UNAVAILABLE',
     'INVALID_REQUEST', 'INVALID_RESPONSE', 'CANCELLED', 'UNKNOWN',
     'EXECUTOR_LOST', 'EXECUTOR_FAILED', 'EXECUTOR_INCOMPLETE',
+    # Added by the WordPress gateway (8.3-3C3). A transport failure is split by
+    # what is provable, because a refused connection and a lost response are
+    # different facts about the same publish attempt.
+    'CONNECTION_NOT_ESTABLISHED', 'READ_TIMEOUT', 'CONNECTION_LOST',
 })
 
 
@@ -343,15 +347,34 @@ class PublishOutcomeKind(str, Enum):
 
 @dataclass(frozen=True, kw_only=True)
 class RemoteReference:
-    """A remote resource that is known to exist."""
+    """A remote resource that is known to exist.
+
+    Identity is the pair ``(content_type, remote_resource_id)``, not the id
+    alone. A publishing target that exposes independent id sequences per
+    content collection -- WordPress does, so post 100 and page 100 are two
+    different resources -- can return the same integer for genuinely distinct
+    resources. Keying on the id alone would collapse them into one and let a
+    reconciler believe a resource exists that it has never seen.
+
+    This stays a generic remote identity: it carries no endpoint, slug, title,
+    marker, workspace, task, publication, or credential.
+    """
+    content_type: ContentType
     remote_resource_id: int
     remote_url: str | None = None
 
     def __post_init__(self):
+        if not isinstance(self.content_type, ContentType):
+            raise ValueError("content_type must be ContentType")
         if type(self.remote_resource_id) is not int or self.remote_resource_id <= 0:
             raise ValueError("remote_resource_id must be a positive int")
         if self.remote_url is not None:
             _validate_non_empty_str(self.remote_url, "remote_url")
+
+    @property
+    def remote_identity(self) -> tuple[ContentType, int]:
+        """The tuple that defines remote uniqueness, for callers to key on."""
+        return (self.content_type, self.remote_resource_id)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -402,15 +425,22 @@ def classify_reconciliation(matches):
 
     Zero matches is evidence the reconciler did not find the item. Exactly one is a
     resolvable reference. More than one stays AMBIGUOUS and every match is returned,
-    because picking one would hide the fact that the side effect may have happened
-    more than once.
+    because picking one would hide the fact that the side effect may have
+    happened more than once.
+
+    Uniqueness is remote IDENTITY, which is ``(content_type, remote_resource_id)``
+    and not the bare integer. Post 100 and page 100 are different resources on a
+    target with per-collection id sequences, so together they are a genuine
+    ambiguity rather than a duplicate. A repeated identical identity is a defect
+    in the caller's result set and fails closed, because silently collapsing it
+    would hide that the same resource was observed twice.
     """
     if not isinstance(matches, (list, tuple)):
         raise ValueError("matches must be a sequence")
     for match in matches:
         if not isinstance(match, RemoteReference):
             raise ValueError("each match must be a RemoteReference")
-    if len({m.remote_resource_id for m in matches}) != len(matches):
+    if len({m.remote_identity for m in matches}) != len(matches):
         raise ValueError("reconciliation matches must be distinct remote resources")
     ordered = tuple(matches)
     if not ordered:

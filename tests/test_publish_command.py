@@ -497,13 +497,14 @@ class TestOutcomeVocabulary:
                            reconciliation_marker=marker) if False else PublishOutcome(
                 kind=PublishOutcomeKind.CONFIRMED_SUCCESS)
         outcome = PublishOutcome(kind=PublishOutcomeKind.CONFIRMED_SUCCESS,
-                                 remote=RemoteReference(remote_resource_id=7))
+                                 remote=RemoteReference(content_type=ContentType.POST, remote_resource_id=7))
         assert outcome.remote.remote_resource_id == 7
         assert outcome.publication_state is PublicationState.SUCCEEDED
 
     def test_success_may_carry_remote_url(self):
         outcome = PublishOutcome(kind=PublishOutcomeKind.CONFIRMED_SUCCESS,
-                                 remote=RemoteReference(remote_resource_id=7,
+                                 remote=RemoteReference(content_type=ContentType.POST,
+                                                        remote_resource_id=7,
                                                         remote_url='https://example.test/p/7'))
         assert outcome.remote.remote_url == 'https://example.test/p/7'
         assert outcome.error_code is None
@@ -511,12 +512,12 @@ class TestOutcomeVocabulary:
     def test_success_rejects_an_error_code(self):
         with pytest.raises(ValueError):
             PublishOutcome(kind=PublishOutcomeKind.CONFIRMED_SUCCESS,
-                           remote=RemoteReference(remote_resource_id=7), error_code='TIMEOUT')
+                           remote=RemoteReference(content_type=ContentType.POST, remote_resource_id=7), error_code='TIMEOUT')
 
     def test_remote_reference_requires_positive_id(self):
         for bad in (0, -1, '7', None):
             with pytest.raises(ValueError):
-                RemoteReference(remote_resource_id=bad)
+                RemoteReference(content_type=ContentType.POST, remote_resource_id=bad)
 
     def test_failure_carries_only_a_safe_code(self):
         outcome = PublishOutcome(kind=PublishOutcomeKind.CONFIRMED_FAILURE, error_code='AUTHENTICATION')
@@ -537,10 +538,10 @@ class TestOutcomeVocabulary:
     def test_indeterminate_never_claims_a_remote_resource(self):
         with pytest.raises(ValueError):
             PublishOutcome(kind=PublishOutcomeKind.OUTCOME_UNKNOWN, error_code='TIMEOUT',
-                           remote=RemoteReference(remote_resource_id=7))
+                           remote=RemoteReference(content_type=ContentType.POST, remote_resource_id=7))
         with pytest.raises(ValueError):
             PublishOutcome(kind=PublishOutcomeKind.CONFIRMED_FAILURE, error_code='TIMEOUT',
-                           remote=RemoteReference(remote_resource_id=7))
+                           remote=RemoteReference(content_type=ContentType.POST, remote_resource_id=7))
 
     def test_outcome_requires_an_explicit_kind(self):
         """There is no (None, None) result shape."""
@@ -557,14 +558,15 @@ class TestReconciliationSemantics:
         assert classify_reconciliation([]) == (ReconciliationMatch.NOT_FOUND, ())
 
     def test_single_match_is_found(self):
-        only = RemoteReference(remote_resource_id=7, remote_url='https://example.test/p/7')
+        only = RemoteReference(content_type=ContentType.POST, remote_resource_id=7,
+                                                    remote_url='https://example.test/p/7')
         kind, matches = classify_reconciliation([only])
         assert kind is ReconciliationMatch.FOUND
         assert matches == (only,)
 
     def test_multiple_matches_stay_ambiguous(self):
-        first = RemoteReference(remote_resource_id=7)
-        second = RemoteReference(remote_resource_id=8)
+        first = RemoteReference(content_type=ContentType.POST, remote_resource_id=7)
+        second = RemoteReference(content_type=ContentType.POST, remote_resource_id=8)
         kind, matches = classify_reconciliation([first, second])
         assert kind is ReconciliationMatch.AMBIGUOUS
         # Every match is surfaced; none is chosen for the caller.
@@ -572,15 +574,15 @@ class TestReconciliationSemantics:
         assert len(matches) == 2
 
     def test_ambiguity_is_never_resolved_by_lowest_id(self):
-        matches = [RemoteReference(remote_resource_id=99), RemoteReference(remote_resource_id=3)]
+        matches = [RemoteReference(content_type=ContentType.POST, remote_resource_id=99), RemoteReference(content_type=ContentType.POST, remote_resource_id=3)]
         kind, surfaced = classify_reconciliation(matches)
         assert kind is ReconciliationMatch.AMBIGUOUS
         assert {m.remote_resource_id for m in surfaced} == {99, 3}
 
     def test_duplicate_remote_ids_fail_closed(self):
         with pytest.raises(ValueError):
-            classify_reconciliation([RemoteReference(remote_resource_id=7),
-                                    RemoteReference(remote_resource_id=7)])
+            classify_reconciliation([RemoteReference(content_type=ContentType.POST, remote_resource_id=7),
+                                    RemoteReference(content_type=ContentType.POST, remote_resource_id=7)])
 
     def test_classifier_rejects_malformed_input(self):
         with pytest.raises(ValueError):
@@ -600,8 +602,10 @@ class TestMarkerIsReconciliationNotIdempotency:
     def test_marker_cannot_prevent_two_remote_creates(self):
         """Two creates carrying the same marker are possible and stay visible."""
         marker_lease = reconciliation_marker(str(uuid4()))
-        duplicate_a = RemoteReference(remote_resource_id=101, remote_url='https://example.test/p/101')
-        duplicate_b = RemoteReference(remote_resource_id=102, remote_url='https://example.test/p/102')
+        duplicate_a = RemoteReference(content_type=ContentType.POST, remote_resource_id=101,
+                                       remote_url='https://example.test/p/101')
+        duplicate_b = RemoteReference(content_type=ContentType.POST, remote_resource_id=102,
+                                       remote_url='https://example.test/p/102')
         kind, matches = classify_reconciliation([duplicate_a, duplicate_b])
         assert kind is ReconciliationMatch.AMBIGUOUS
         assert [m.remote_resource_id for m in matches] == [101, 102]
