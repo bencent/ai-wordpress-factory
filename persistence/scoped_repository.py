@@ -6,6 +6,7 @@ The workspace ID is required, with no default-workspace fallback in persistence.
 from domain.contracts import Task, TaskRun, TaskEvent, ContentVersion
 from domain.providers import Workspace, AIProviderConnection, Capability
 from domain.preview import StoredPreview
+from domain.publication import ApprovedVersion, PublicationRequest, PublicationState
 from persistence.connection import PersistenceError
 
 
@@ -260,3 +261,36 @@ class SQLiteWorkspaceRepository:
         Raises ValueError('IDEMPOTENCY_CONFLICT') on conflicting idempotency key.
         """
         return self._internal.request_revision(self._workspace_id, task_id, content_version_id, feedback, idempotency_key, now)
+
+    def approved_version(self, task_id):
+        """Resolve the exact approved ContentVersion for a task in this workspace.
+
+        Source is the immutable TASK_APPROVED event. Task.latest_content_version_id
+        is never used. Returns None when the task does not exist here or was never
+        approved; raises PersistenceError when approval history is inconsistent.
+        """
+        return self._internal.approved_version(self._workspace_id, task_id)
+
+    def request_publication(self, task_id, content_version_id, idempotency_key, now):
+        """Record one intent to publish the exact approved ContentVersion.
+
+        Rejects a task that is not APPROVED, an unknown version, and any version
+        other than the one named by TASK_APPROVED. Returns
+        (PublicationRequest, None) or (None, error_code), and raises
+        ValueError('IDEMPOTENCY_CONFLICT') when the key already names a different
+        task or version. Performs no external call.
+        """
+        return self._internal.request_publication(self._workspace_id, task_id,
+                                                  content_version_id, idempotency_key, now)
+
+    def get_publication(self, publication_id):
+        """Read one publication request; a foreign workspace reads nothing."""
+        return self._internal.get_publication(self._workspace_id, publication_id)
+
+    def find_publication(self, idempotency_key):
+        """Resolve an idempotency key to (task_id, content_version_id, publication_id, state)."""
+        return self._internal.find_publication(self._workspace_id, idempotency_key)
+
+    def publications_for_task(self, task_id):
+        """List this workspace's publication requests for a task, in creation order."""
+        return self._internal.publications_for_task(self._workspace_id, task_id)
