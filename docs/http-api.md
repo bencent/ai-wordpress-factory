@@ -16,13 +16,26 @@ start each process in its own terminal using the same `AIWF_DATABASE` and
 Terminal 1 — API:
 
 ```powershell
-python -m uvicorn api.app:app --host 127.0.0.1 --port 8000
+python -m uvicorn api.app:get_app --factory --host 127.0.0.1 --port 8000
 ```
+
+`--factory` is required. `api.app` exposes a lazy `get_app()` factory and its
+module-level `app` name is `None` until that factory runs, so the `api.app:app`
+form starts a process in which every request fails with
+`'NoneType' object is not callable`. Pass the factory and `--factory`, and
+`get_app()` builds the application on first use.
 
 Terminal 2 — Worker:
 
 ```powershell
 python -m worker
+```
+
+Terminal 3 — publication worker (a separate runtime with a separate composition;
+it never constructs the content worker's dependencies):
+
+```powershell
+python -m worker --publication
 ```
 
 For diagnosis or a single queued-task attempt, run:
@@ -41,8 +54,52 @@ Provider credentials are resolved through the existing `env:` credential
 references. Never place credential values on the command line or in the
 profiles file. systemd, Docker, Windows Service integration, and automatic
 restart configuration are deferred to Phase 8.6. This slice does not document
-public-network binding or production authentication. It has no login, public
-deployment configuration, UI, approval, or publishing routes.
+public-network binding or production authentication. It has no login and no
+public deployment configuration.
+
+The Phase 8.1 routes below have since been joined by Human Review and
+Publication routes added in 8.3; the table is the original 8.1 contract, kept as
+written for that milestone.
+
+## Publishing target provisioning
+
+A workspace publishes only to a configured destination, and nothing in the
+application creates one. Record it with the provisioning CLI, which reads the
+same `AIWF_DATABASE` as the API and Worker and migrates it on open:
+
+```powershell
+python -m admin publishing-target add `
+  --workspace-id <workspace_id> `
+  --base-url https://example.test `
+  --username <wordpress_username> `
+  --credential-reference env:AIWF_WP_APP_PASSWORD
+```
+
+`--credential-reference` is the **pointer** that gets stored in the database
+(`env:AIWF_WP_APP_PASSWORD`). The value it points at lives in the shell
+environment of the API and publication worker:
+
+```sh
+export AIWF_WP_APP_PASSWORD='...'
+```
+
+**The Application Password value is never stored in the database, never passed
+as a command-line argument, and never read by the provisioning command.** There
+is deliberately no `--password` or `--application-password` flag: a value on the
+command line lives in shell history and the process table. Only the reference
+row is durable; the secret is resolved at publication time by the existing
+`EnvironmentSecretResolver`, inside the worker, exactly as AI provider
+credentials are.
+
+Provisioning records configuration; it does not validate the credential.
+Reachability and authentication are established by the first real publication.
+
+A workspace may hold exactly one ACTIVE target per provider type — a partial
+unique index enforces it. If one already exists the command fails and changes
+nothing; it never replaces a destination. Rotation is a configuration change on
+the existing target (a new `configuration_version`, with the previous
+configuration preserved for publications that already snapshotted it), not a new
+target.
 
 ## Routes
 

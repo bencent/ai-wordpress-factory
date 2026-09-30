@@ -553,7 +553,13 @@ def test_playwright_7b_task_creation_polling_and_stale_response_protection():
 # 8.3-4E1 Human Review: static contract proofs
 # ---------------------------------------------------------------------------
 
-BASELINE_COMMIT = "b1b0502"
+# The 4E2 slice is ONE COMMIT, so its boundary is checked against that commit's own
+# range rather than against the working tree. A working-tree comparison against a
+# historical baseline attributes every later slice's changes to 4E2, so the assertion
+# silently changes meaning and then fails for an unrelated slice. These two refs are
+# immutable: no later work can alter what 4E2 touched.
+SLICE_4E2_COMMIT = "5c5370c"
+SLICE_4E2_PARENT = "3607cb9"
 FRONTEND_ALLOWED = {
     "static/index.html", "static/js/api.js", "static/js/app.js", "static/js/state.js",
     "static/css/app.css", "tests/test_ui_shell.py",
@@ -689,25 +695,41 @@ def test_4e1_human_review_contract_survives_the_publication_slice():
 
 
 def test_4e2_touches_no_backend_module():
-    """AA 18 / AV 20: the frontend slices never modify a backend module."""
+    """AA 18 / AV 20: the 4E2 frontend slice never modified a backend module.
+
+    Scoped to the historical 4E2 commit range, not the working tree, so this keeps
+    testing what 4E2 actually did for as long as the ref exists. It is a permanent
+    record of that slice's boundary rather than a live gate on whatever is currently
+    uncommitted -- a later slice gets its own boundary test against its own commit.
+    """
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=ROOT, capture_output=True,
+                              text=True, timeout=60, check=True).stdout.strip()
+
     try:
-        changed = subprocess.run(
-            ["git", "diff", "--name-only", f"{BASELINE_COMMIT}"],
-            cwd=ROOT, capture_output=True, text=True, timeout=60, check=True,
-        ).stdout.split()
-    except (OSError, subprocess.SubprocessError) as error:  # pragma: no cover - environment guard
-        pytest.skip(f"git baseline comparison unavailable: {error}")
-    if not changed:
-        pytest.skip("No working-tree changes relative to the baseline commit")
-    # The hard rule: no backend module may change. Everything else must be an explicitly
-    # named file, so an accidental edit anywhere else still fails loudly.
+        # Fail loudly if the range is pointed at the wrong commit, rather than
+        # checking some other slice's file list and calling it a pass.
+        subject = git("log", "-1", "--format=%s", SLICE_4E2_COMMIT)
+        changed = git("diff", "--name-only", SLICE_4E2_PARENT, SLICE_4E2_COMMIT).split()
+    except (OSError, subprocess.SubprocessError) as error:  # pragma: no cover
+        pytest.skip(f"git history unavailable: {error}")
+
+    assert subject == "feat(ui): add publication and recovery workflow", \
+        f"{SLICE_4E2_COMMIT} is not the 4E2 commit: {subject!r}"
+    assert changed, f"{SLICE_4E2_PARENT}..{SLICE_4E2_COMMIT} resolved to no changes"
+
+    # The hard rule: no backend module may change. Everything else must be an
+    # explicitly named file, so an accidental edit anywhere else still fails loudly.
     assert not any(name.startswith(BACKEND_DIRS) for name in changed), \
-        f"a backend module was modified: {sorted(changed)}"
+        f"4E2 modified a backend module: {sorted(changed)}"
     outside = sorted(name for name in changed if name not in ALLOWED)
-    assert not outside, f"files changed outside the permitted slice: {outside}"
+    assert not outside, f"4E2 modified files outside the permitted slice: {outside}"
     # migrations/ and prompts/ are backend surface too, and are not in BACKEND_DIRS.
     for prefix in ("persistence/migrations", "prompts", "config.py", "worker/"):
         assert not any(name.startswith(prefix) for name in changed), prefix
+    # And the frontend it was actually about is present, so an empty-ish or
+    # mis-resolved range cannot satisfy the check above.
+    assert any(name.startswith("static/") for name in changed), changed
 
 
 # ---------------------------------------------------------------------------
