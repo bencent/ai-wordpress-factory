@@ -130,6 +130,26 @@
           </div>
           <div id="current-task-empty" class="quiet-state">尚未選擇任務</div>
           <div id="current-task-detail" class="current-task-detail" hidden></div>
+          <div id="review-region" class="review-region" hidden>
+            <p id="review-note" class="review-note">等待核准：此任務等待人工確認，可以直接核准，或先提出修改要求。</p>
+            <div id="review-actions" class="form-actions">
+              <button id="approve-task" class="primary-button" type="button">核准</button>
+              <button id="request-revision" class="text-button" type="button" aria-expanded="false" aria-controls="revision-fields">要求修改</button>
+            </div>
+            <div id="revision-fields" class="revision-fields" hidden>
+              <label class="revision-label" for="revision-feedback">修改方向</label>
+              <textarea id="revision-feedback" name="feedback" rows="5" maxlength="10000" placeholder="請說明希望調整的內容，例如語氣、重點、段落或資訊。"></textarea>
+              <div class="form-actions">
+                <button id="submit-revision" class="primary-button" type="button">送出修改要求</button>
+                <button id="cancel-revision" class="text-button" type="button">取消</button>
+              </div>
+            </div>
+            <div id="review-uncertain-actions" class="form-actions" hidden>
+              <button id="resubmit-review" class="text-button" type="button">使用相同提交識別重新送出</button>
+              <button id="cancel-review" class="text-button" type="button">取消</button>
+            </div>
+            <div id="review-message" class="form-message" role="status" aria-live="polite"></div>
+          </div>
           <div id="retry-actions" class="form-actions" hidden>
             <button id="retry-task" class="primary-button" type="button">以相同需求重試</button>
             <button id="retry-cancel" class="text-button" type="button" hidden>取消重試</button>

@@ -8,6 +8,13 @@ export function createState(initial = {}) {
     error: null,
     connectionState: 'online',
     retryIntent: null,
+    // Human Review. Each intent is bound to one taskId + contentVersionId pair so a
+    // genuinely new review of a revised version can never inherit an old key.
+    approveIntent: null,
+    revisionIntent: null,
+    revisionOpen: false,
+    reviewMessage: '',
+    reviewMessageError: false,
     draft: {content_type: 'POST', topic: '', brief: '', target_audience: '', page_purpose: ''},
     submission: {phase: 'idle', key: null, body: null, task: null, message: ''},
     tasks: [],

@@ -167,6 +167,100 @@ function renderDetail(next) {
   replaceChildren(elements['event-list'], events);
 }
 
+// Human Review. Task detail status is the only eligibility signal: events, run
+// attempt, content type and the task list are never consulted. latest_content_version_id
+// is sent verbatim; when it is missing neither action is enabled and no id is invented.
+function reviewVersionId(detail) {
+  if (detail?.status !== 'AWAITING_APPROVAL') return null;
+  const value = detail.latest_content_version_id;
+  return typeof value === 'string' && value ? value : null;
+}
+
+function reviewTarget() {
+  const next = state.snapshot;
+  const contentVersionId = reviewVersionId(next.taskDetail);
+  if (!contentVersionId || !next.selectedTaskId) return null;
+  return {taskId: next.selectedTaskId, contentVersionId};
+}
+
+// An intent only ever belongs to the exact task + content version it was created for.
+// Selecting another task therefore cannot render a foreign intent, and a version that
+// moved on invalidates the intent instead of reusing its key.
+function matchedIntent(intent, next) {
+  const contentVersionId = reviewVersionId(next.taskDetail);
+  if (!intent || !contentVersionId) return null;
+  if (intent.taskId !== next.selectedTaskId) return null;
+  return intent.contentVersionId === contentVersionId ? intent : null;
+}
+
+function reviewBusy(next) {
+  return matchedIntent(next.approveIntent, next)?.phase === 'submitting'
+    || matchedIntent(next.revisionIntent, next)?.phase === 'submitting';
+}
+
+function renderReview(next) {
+  const detail = next.taskDetail;
+  const region = elements['review-region'];
+  const awaiting = detail?.status === 'AWAITING_APPROVAL';
+  const contentVersionId = reviewVersionId(detail);
+  const approve = matchedIntent(next.approveIntent, next);
+  const revision = matchedIntent(next.revisionIntent, next);
+  const submitting = reviewBusy(next);
+  // An uncertain request owns the block until it is retried or cancelled, so a second
+  // logical request can never be minted for the same content version.
+  const uncertain = approve?.phase === 'uncertain' || revision?.phase === 'uncertain';
+  const blocked = submitting || uncertain;
+
+  let message = next.reviewMessage || '';
+  let failed = Boolean(next.reviewMessageError);
+  if (!message && awaiting) {
+    if (!contentVersionId) {
+      message = '目前無法取得待核准的內容版本，請重新載入後再試。';
+      failed = true;
+    } else if (approve?.phase === 'submitting') {
+      message = '正在核准…';
+    } else if (revision?.phase === 'submitting') {
+      message = '正在送出修改要求…';
+    } else if (approve?.phase === 'uncertain') {
+      message = '無法確認核准是否完成。';
+      failed = true;
+    } else if (revision?.phase === 'uncertain') {
+      message = '無法確認修改要求是否已送出。';
+      failed = true;
+    }
+  }
+
+  // The controls exist only for AWAITING_APPROVAL. The panel itself stays up while a
+  // review outcome is still on screen, so a confirmed result is never silently dropped
+  // by the very transition that removes the controls.
+  region.hidden = !detail || (!awaiting && !message);
+  elements['review-note'].hidden = !awaiting;
+  elements['review-actions'].hidden = !awaiting || !contentVersionId;
+  elements['approve-task'].disabled = !contentVersionId || blocked;
+  elements['approve-task'].textContent = approve?.phase === 'submitting' ? '正在核准…' : '核准';
+  elements['request-revision'].disabled = !contentVersionId || blocked;
+
+  const open = awaiting && Boolean(next.revisionOpen) && Boolean(contentVersionId);
+  elements['request-revision'].setAttribute('aria-expanded', String(open));
+  elements['revision-fields'].hidden = !open;
+  // A frozen uncertain payload is written back into the field so the operator can read
+  // exactly what was sent, and marked read-only so it cannot drift before the retry.
+  if (revision?.phase === 'uncertain' && elements['revision-feedback'].value !== revision.feedback) {
+    elements['revision-feedback'].value = revision.feedback;
+  }
+  elements['revision-feedback'].readOnly = revision?.phase === 'uncertain';
+  elements['revision-feedback'].disabled = submitting;
+  elements['submit-revision'].disabled = submitting || !contentVersionId;
+  elements['cancel-revision'].hidden = uncertain;
+  elements['cancel-revision'].disabled = submitting;
+
+  elements['review-uncertain-actions'].hidden = !uncertain;
+  elements['resubmit-review'].disabled = submitting;
+
+  elements['review-message'].textContent = message;
+  elements['review-message'].classList.toggle('is-error', failed);
+}
+
 function render(next) {
   const connection = elements['connection-status'];
   const message = elements['system-message'];
@@ -194,12 +288,18 @@ function render(next) {
   renderForm(next);
   renderTasks(next);
   renderDetail(next);
+  renderReview(next);
 }
 
 function safeMessage(error, fallback = '目前無法完成操作，請稍後再試。') {
   if (error instanceof TimeoutError || error instanceof NetworkError) return error.message;
   if (error instanceof ApiError && error.code === 'IDEMPOTENCY_CONFLICT') return '提交識別與先前需求不一致，請取消後重新建立。';
   if (error instanceof ApiError && error.code === 'VALIDATION_ERROR') return '請檢查欄位內容後再送出。';
+  // Human Review. Only known, already-mapped backend codes get specific copy; every
+  // other failure keeps the generic fallback so raw server text never reaches the DOM.
+  if (error instanceof ApiError && error.code === 'APPROVAL_CONFLICT') return '目前狀態無法核准此任務，請重新載入後再試。';
+  if (error instanceof ApiError && error.code === 'REVISION_CONFLICT') return '目前狀態無法提出修改要求，請重新載入後再試。';
+  if (error instanceof ApiError && error.code === 'TASK_NOT_FOUND') return '找不到這個任務，可能已被移除。';
   return fallback;
 }
 
@@ -281,6 +381,118 @@ async function retrySelectedTask() {
   }
 }
 
+// A review message belongs to the action context. selectTask clears it so it can never
+// be read as belonging to a newly selected task.
+function clearReviewNotice() {
+  return {reviewMessage: '', reviewMessageError: false};
+}
+
+async function settleReview(taskId, notice) {
+  // Durable state is the authority. A late response for a task the user has already
+  // left refreshes nothing and claims no selection.
+  if (state.snapshot.selectedTaskId !== taskId) return;
+  await selectTask(taskId);
+  state.set(notice);
+}
+
+async function approveSelectedTask({reuse = false} = {}) {
+  const current = state.snapshot;
+  const target = reviewTarget();
+  if (!target) return;
+  const {taskId, contentVersionId} = target;
+  const intent = matchedIntent(current.approveIntent, current);
+  if (intent?.phase === 'submitting') return;
+  if (reuse && intent?.phase !== 'uncertain') return;
+  if (!reuse && reviewBusy(current)) return;
+  // One key per logical approval. Reuse only across an uncertain transport result for
+  // this exact task + version; a new version always mints a new key.
+  const key = intent?.phase === 'uncertain' ? intent.key : crypto.randomUUID();
+  state.set({approveIntent: {taskId, contentVersionId, key, phase: 'submitting'}, ...clearReviewNotice()});
+  try {
+    const updated = await api.approveTask(taskId, contentVersionId, key);
+    state.set({approveIntent: null, message: '已送出核准。'});
+    mergeTasks([updated]);
+    await settleReview(taskId, {reviewMessage: '已送出核准。', reviewMessageError: false});
+  } catch (error) {
+    if (error instanceof NetworkError || error instanceof TimeoutError) {
+      // The request may or may not have been applied. Keep the key so a retry is the
+      // same logical approval rather than a second one.
+      state.set({approveIntent: {taskId, contentVersionId, key, phase: 'uncertain'}});
+      return;
+    }
+    state.set({approveIntent: null, message: safeMessage(error, '目前無法核准此任務。')});
+    await settleReview(taskId, {reviewMessage: safeMessage(error, '目前無法核准此任務。'), reviewMessageError: true});
+  }
+}
+
+function openRevisionFields() {
+  const current = state.snapshot;
+  if (!reviewTarget() || reviewBusy(current)) return;
+  if (matchedIntent(current.revisionIntent, current)?.phase === 'uncertain') return;
+  state.set({revisionOpen: true, ...clearReviewNotice()});
+  elements['revision-feedback'].focus();
+}
+
+function cancelRevision() {
+  const current = state.snapshot;
+  if (matchedIntent(current.revisionIntent, current)?.phase === 'submitting') return;
+  elements['revision-feedback'].value = '';
+  state.set({revisionIntent: null, revisionOpen: false, ...clearReviewNotice()});
+}
+
+async function submitRevision({reuse = false} = {}) {
+  const current = state.snapshot;
+  const target = reviewTarget();
+  if (!target) return;
+  const {taskId, contentVersionId} = target;
+  const intent = matchedIntent(current.revisionIntent, current);
+  if (intent?.phase === 'submitting') return;
+  if (reuse && intent?.phase !== 'uncertain') return;
+  if (!reuse && reviewBusy(current)) return;
+  // A retry must resend the frozen payload from the intent, never the textarea: one
+  // idempotency key may only ever refer to one payload.
+  const feedback = reuse ? intent.feedback : elements['revision-feedback'].value.trim();
+  if (!feedback) {
+    state.set({reviewMessage: '請先填寫修改方向再送出。', reviewMessageError: true});
+    elements['revision-feedback'].focus();
+    return;
+  }
+  const key = intent?.phase === 'uncertain' ? intent.key : crypto.randomUUID();
+  state.set({revisionIntent: {taskId, contentVersionId, key, feedback, phase: 'submitting'}, ...clearReviewNotice()});
+  try {
+    const updated = await api.requestRevision(taskId, contentVersionId, feedback, key);
+    state.set({revisionIntent: null, revisionOpen: false, message: '已送出修改要求。'});
+    elements['revision-feedback'].value = '';
+    mergeTasks([updated]);
+    await settleReview(taskId, {reviewMessage: '已送出修改要求。', reviewMessageError: false});
+  } catch (error) {
+    if (error instanceof NetworkError || error instanceof TimeoutError) {
+      state.set({revisionIntent: {taskId, contentVersionId, key, feedback, phase: 'uncertain'}});
+      return;
+    }
+    state.set({revisionIntent: null, message: safeMessage(error, '目前無法提出修改要求。')});
+    await settleReview(taskId, {reviewMessage: safeMessage(error, '目前無法提出修改要求。'), reviewMessageError: true});
+  }
+}
+
+function resubmitReview() {
+  const current = state.snapshot;
+  if (reviewBusy(current)) return;
+  if (matchedIntent(current.approveIntent, current)?.phase === 'uncertain') {
+    approveSelectedTask({reuse: true});
+    return;
+  }
+  if (matchedIntent(current.revisionIntent, current)?.phase === 'uncertain') {
+    submitRevision({reuse: true});
+  }
+}
+
+function cancelReview() {
+  if (reviewBusy(state.snapshot)) return;
+  elements['revision-feedback'].value = '';
+  state.set({approveIntent: null, revisionIntent: null, revisionOpen: false, reviewMessage: '已取消未確認的送出。', reviewMessageError: false});
+}
+
 function mergeTasks(incoming, {append = false, nextCursor = state.snapshot.nextCursor} = {}) {
   const existing = state.snapshot.tasks;
   const combined = append ? [...existing, ...incoming] : [...incoming, ...existing];
@@ -309,7 +521,7 @@ async function selectTask(taskId) {
   if (!taskId) return;
   const generation = ++detailGeneration;
   ++eventGeneration;
-  state.set({selectedTaskId: taskId, taskDetail: null, events: [], lastSequence: 0, eventsLoading: true});
+  state.set({selectedTaskId: taskId, taskDetail: null, events: [], lastSequence: 0, eventsLoading: true, ...clearReviewNotice()});
   const detailPromise = api.getTask(taskId).then((detail) => {
     if (generation === detailGeneration && state.snapshot.selectedTaskId === taskId) state.set({taskDetail: detail});
   }).catch(() => {
@@ -396,6 +608,12 @@ elements['retry-cancel'].addEventListener('click', () => {
   state.set({retryIntent: null, message: '已取消不確定的重試。'});
 });
 elements['load-more'].addEventListener('click', () => loadTasks({append: true}));
+elements['approve-task'].addEventListener('click', () => approveSelectedTask());
+elements['request-revision'].addEventListener('click', openRevisionFields);
+elements['submit-revision'].addEventListener('click', () => submitRevision());
+elements['cancel-revision'].addEventListener('click', cancelRevision);
+elements['resubmit-review'].addEventListener('click', resubmitReview);
+elements['cancel-review'].addEventListener('click', cancelReview);
 tabs.forEach((tab, index) => {
   tab.addEventListener('click', () => setPanel(panelFor(tab)));
   tab.addEventListener('keydown', (event) => {

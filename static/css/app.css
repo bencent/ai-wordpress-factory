@@ -681,6 +681,40 @@ fieldset:disabled {
   border-radius: 6px;
 }
 
+/* Human Review sits inside the current-task section and inherits the single
+   column flow of the existing 900px breakpoint. No fixed widths: the textarea
+   already uses width:100% from the shared input rule. */
+.review-region {
+  margin-top: 16px;
+  padding: 16px;
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  background: var(--surface-muted);
+}
+
+.review-note {
+  margin: 0 0 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.revision-fields {
+  display: grid;
+  gap: 6px;
+  margin-top: 14px;
+}
+
+.revision-label {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.revision-fields .form-actions {
+  margin-top: 8px;
+}
+
 .panel-side {
   border-left: 1px solid var(--border);
 }

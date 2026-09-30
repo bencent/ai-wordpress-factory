@@ -97,6 +97,22 @@ export function createApiClient({fetchImpl = globalThis.fetch?.bind(globalThis),
       headers: {'Idempotency-Key': requireId(idempotencyKey, 'idempotency_key')},
       body: '{}',
     }),
+    // Human Review. The route contract allows exactly one body key for approve and
+    // exactly two for revision, so the payloads are built here and cannot grow
+    // workspace_id, task_id, or any other identifier by accident.
+    approveTask: (taskId, contentVersionId, idempotencyKey) => request(`/api/v1/tasks/${encodeURIComponent(requireId(taskId, 'task_id'))}/approve`, {
+      method: 'POST',
+      headers: {'Idempotency-Key': requireId(idempotencyKey, 'idempotency_key')},
+      body: JSON.stringify({content_version_id: requireId(contentVersionId, 'content_version_id')}),
+    }),
+    requestRevision: (taskId, contentVersionId, feedback, idempotencyKey) => request(`/api/v1/tasks/${encodeURIComponent(requireId(taskId, 'task_id'))}/request-revision`, {
+      method: 'POST',
+      headers: {'Idempotency-Key': requireId(idempotencyKey, 'idempotency_key')},
+      body: JSON.stringify({
+        content_version_id: requireId(contentVersionId, 'content_version_id'),
+        feedback: requireId(feedback, 'feedback'),
+      }),
+    }),
     getStatus: () => request('/api/v1/system/status'),
   });
 }
