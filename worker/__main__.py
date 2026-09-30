@@ -56,12 +56,68 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help='Local image storage root (default: artifacts/images)',
     )
+    parser.add_argument(
+        '--publication',
+        action='store_true',
+        help=('Run the publication runtime instead of the content worker: expire stale '
+              'publication/reconciliation claims, then give each one bounded turn. '
+              'Separate from the content worker on purpose -- the two own different '
+              'lease models, and running them in one process would mean dispatching '
+              'on lease type. Without this flag nothing about the existing content '
+              'worker changes.'),
+    )
+    parser.add_argument(
+        '--publication-gateway-timeout',
+        type=float,
+        default=None,
+        help=('Per-phase WordPress timeout for the publication runtime, in seconds. '
+              'Must satisfy stale_seconds >= 2 * timeout + 5. (default: 15.0)'),
+    )
     return parser.parse_args()
+
+
+def _run_publication_mode(args) -> int:
+    """Explicit publication runtime. Never constructs FactoryAdapter or LeaseService."""
+    try:
+        from service.publication_bootstrap import (
+            PublicationBootstrapError as bootstrap_error,
+            build_publication_worker,
+            run_publication_worker,
+        )
+    except Exception:
+        print('Worker configuration failed.', file=sys.stderr)
+        return 1
+
+    try:
+        worker = build_publication_worker(
+            database_path=args.database,
+            stale_seconds=args.stale_seconds,
+            gateway_timeout=args.publication_gateway_timeout,
+        )
+    except Exception:
+        print('Worker configuration failed.', file=sys.stderr)
+        return 1
+
+    try:
+        return run_publication_worker(worker, poll_seconds=args.poll_seconds,
+                                      run_once=args.once)
+    except bootstrap_error:
+        print('Worker execution failed.', file=sys.stderr)
+        return 2
+    except Exception:
+        print('Worker execution failed.', file=sys.stderr)
+        return 2
 
 
 def main() -> int:
     global build_worker, run_worker, WorkerBootstrapError
     args = _parse_args()
+
+    # The publication runtime is a separate mode with a separate composition. It
+    # returns before any content-worker import, so `python -m worker` and
+    # `python -m worker --publication` never share a dependency graph.
+    if args.publication:
+        return _run_publication_mode(args)
 
     try:
         if build_worker is None or run_worker is None or WorkerBootstrapError is None:
