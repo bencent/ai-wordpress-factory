@@ -28,11 +28,21 @@ def provider_from_connection(connection, capability, resolver=None):
             return OpenAITextProvider(secret, connection.default_model)
         return GroqTextProvider(secret, connection.default_model)
     # No Config constructor: explicit credentials cannot be replaced by global environment.
-    options = SimpleNamespace(openai_api_key=secret, visual_quality_model=connection.default_model)
+    #
+    # Only the credential is carried here. `connection.default_model` is the TEXT
+    # model's configuration, and seeding it into the shared namespace mapped that text
+    # model onto the image and visual-quality paths as well. A single column is not
+    # evidence that one model serves three capabilities, and the providers already know
+    # their own defaults: OpenAIImageProvider falls back to the per-request model
+    # (ImageGenerationRequest.model, "dall-e-3") and OpenAIVisualQualityProvider falls
+    # back to its own vision default. Overriding those from here was the defect, so the
+    # attributes are deliberately absent and each provider resolves its own.
+    options = SimpleNamespace(openai_api_key=secret)
     if capability == Capability.IMAGE:
         if connection.provider_type == 'GROQ':
             raise ProviderFailure(ErrorCode.UNSUPPORTED_CAPABILITY)
-        return OpenAIImageProvider(options, model=connection.default_model)
+        # No model= override: leaving it None keeps the request-level fallback.
+        return OpenAIImageProvider(options)
     if capability == Capability.VISUAL_QUALITY:
         if connection.provider_type == 'OPENAI':
             return OpenAIVisualQualityProvider(options)
