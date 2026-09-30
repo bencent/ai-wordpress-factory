@@ -1086,28 +1086,36 @@ class TestExclusions:
                               "RECONCILIATION_"):
                 assert forbidden not in source, f"{relative} must not contain {forbidden}"
 
-    def test_no_reconciliation_worker_exists_anywhere(self):
-        """3C6C provides the contract; the worker is 3C6D and does not exist yet.
+    def test_no_reconciliation_worker_exists_yet(self):
+        """3C6B added durable target EVIDENCE, not reconciliation.
 
-        Scoped to the whole source tree, so this fails the moment a loop, a
-        scheduler, or a gateway call is introduced.
+        Re-scoped: 3C6C added the durable contract and 3C6D the worker, so a
+        whole-tree worker scan would now be false by construction. What remains
+        meaningful for the modules 3C6B actually wrote is that they stayed
+        evidence-only, and that the worker which now exists is read-only and
+        one-shot.
         """
-        import_root = ROOT
-        forbidden = ("find_by_marker(", "classify_reconciliation(",
-                     "ReconciliationWorker", "while True", "schedule", "backoff",
-                     "sleep(")
-        offenders = []
-        for path in sorted((import_root / "service").glob("*.py")):
-            source = path.read_text(encoding="utf-8")
-            for symbol in forbidden:
-                if symbol in source:
-                    offenders.append(f"{path.name}:{symbol}")
-        for path in sorted((import_root / "worker").glob("*.py")):
-            source = path.read_text(encoding="utf-8")
-            for symbol in ("find_by_marker", "reconciliation", "Reconciliation"):
-                if symbol in source:
-                    offenders.append(f"{path.name}:{symbol}")
-        assert not offenders, f"reconciliation worker machinery appeared: {offenders}"
+        for relative in ("domain/publishing_target.py",
+                         "persistence/migrations/0013_publishing_target_history.sql",
+                         "persistence/publishing_target_repository.py"):
+            source = code_of(relative) if relative.endswith(".py") else \
+                (ROOT / relative).read_text(encoding="utf-8")
+            for forbidden in ("find_by_marker", "classify_reconciliation",
+                              "ReconciliationWorker", "ReconciliationLookupUnresolved",
+                              "resolve_publication_succeeded", "resolve_publication_failed",
+                              "claim_publication_for_reconciliation",
+                              "reconciliation_requested_at", "reconciliation_owner_id",
+                              "RECONCILIATION_"):
+                assert forbidden not in source, f"{relative} must not contain {forbidden}"
+
+        # The worker that 3C6D added must stay read-only and one-shot.
+        worker = ROOT / "service" / "publication_reconciler.py"
+        if worker.exists():
+            source = code_of("service/publication_reconciler.py")
+            for forbidden in (".publish(", "resolve_reconciliation_failed", "sleep",
+                              "backoff", "while True", "Thread", "Timer"):
+                assert forbidden not in source, \
+                    f"the reconciler must stay read-only and one-shot: {forbidden}"
 
     def test_no_reconciliation_error_codes_were_added(self):
         from domain.publication import SAFE_PUBLICATION_ERROR_CODES

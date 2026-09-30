@@ -1349,15 +1349,34 @@ class TestExclusions:
                               "urllib.request", "socket", "http.client"):
                 assert forbidden not in source, f"{relative} must not use {forbidden}"
 
-    def test_no_worker_anywhere_in_the_source_tree(self):
+    def test_no_retry_machinery_in_the_durable_contract(self):
+        """3C6C shipped the CONTRACT; 3C6D later added the worker.
+
+        This test deliberately no longer asserts that no worker exists anywhere,
+        because 3C6D built one. What 3C6C owned is the DURABLE surface, and the
+        invariant that still holds there is that it contains no automatic retry:
+        a contract that could re-arm a request would defeat the one-attempt
+        semantics regardless of what any worker does with it.
+        """
         offenders = []
-        for folder in ("service", "worker"):
-            for path in sorted((ROOT / folder).glob("*.py")):
-                source = path.read_text(encoding="utf-8")
-                for symbol in WORKER_SYMBOLS:
-                    if symbol in source:
-                        offenders.append(f"{path.name}:{symbol}")
-        assert not offenders, f"worker machinery appeared: {offenders}"
+        for relative in ("persistence/publication_repository.py",
+                         "persistence/scoped_repository.py",
+                         "domain/publication.py",
+                         "persistence/migrations/0014_publication_reconciliation.sql"):
+            if relative.endswith(".py"):
+                source = code_of(relative)
+            else:
+                # Strip -- comments: the migration's prose explains WHY no
+                # attempt_count exists, and a comment must not be able to fail (or
+                # satisfy) an assertion about executable behaviour.
+                import re as _re
+                source = _re.sub(r"--[^\n]*", "", (ROOT / relative).read_text(encoding="utf-8"))
+            for symbol in ("resolve_reconciliation_failed", "requeue", "backoff",
+                           "next_retry", "attempt_count", "retry_count",
+                           "schedule_reconciliation", "auto_request"):
+                if symbol in source:
+                    offenders.append(f"{relative}:{symbol}")
+        assert not offenders, f"retry machinery appeared in the contract: {offenders}"
 
     def test_no_attempt_counter(self, store):
         """An operator decides how many attempts happen by how many they request."""
