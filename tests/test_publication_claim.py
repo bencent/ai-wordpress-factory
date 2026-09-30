@@ -725,7 +725,7 @@ class TestMigrationUpgrade:
         store = SQLiteStore(factory)
         with store.reader() as repo:
             assert [r[0] for r in repo._conn.execute('SELECT version FROM schema_migrations '
-                                                      'ORDER BY version')] == list(range(1, 13))
+                                                      'ORDER BY version')] == list(range(1, 14))
             rows = repo._conn.execute('SELECT * FROM task_publication_requests ORDER BY state').fetchall()
             assert [r['state'] for r in rows] == ['FAILED', 'INDETERMINATE', 'PENDING', 'SUCCEEDED']
             for row in rows:

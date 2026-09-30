@@ -363,7 +363,7 @@ class TestPublishingTargetDomain:
 class TestSchema0011:
     def test_migration_0011_applies_cleanly(self, store):
         versions = [r[0] for r in db_read(store, "SELECT version FROM schema_migrations ORDER BY version")]
-        assert versions == list(range(1, 13))
+        assert versions == list(range(1, 14))
 
     def test_schema_remains_strict(self, store):
         for table in ("publishing_targets", "task_publication_requests"):
@@ -500,11 +500,15 @@ class TestTargetMutation:
                      (target.target_id,))
 
     def test_configuration_version_cannot_move_backwards(self, store, target):
+        # 3C4B set this up by jumping v1 -> v5, which 0013's contiguity guard now
+        # forbids in its own right. The intent of the test is unchanged and is
+        # still proven: after a legal increment, a lower version is rejected. The
+        # jump is asserted separately in TestHistoryVersionRules.
         db_write(store, "UPDATE publishing_targets SET base_url='https://one.example',"
-                        "configuration_version=5 WHERE target_id=?", (target.target_id,))
+                        "configuration_version=2 WHERE target_id=?", (target.target_id,))
         with pytest.raises(sqlite3.IntegrityError, match="configuration_version"):
             db_write(store, "UPDATE publishing_targets SET base_url='https://two.example',"
-                            "configuration_version=4 WHERE target_id=?", (target.target_id,))
+                            "configuration_version=1 WHERE target_id=?", (target.target_id,))
 
     def test_status_only_change_does_not_increment_version(self, store, workspace, target):
         with store.workspace_transaction(workspace) as repo:

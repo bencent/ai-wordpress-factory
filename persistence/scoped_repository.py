@@ -110,6 +110,26 @@ class SQLiteWorkspaceRepository:
         """All targets owned by this workspace."""
         return self._internal.publishing_targets(self._workspace_id)
 
+    def get_publishing_target_version(self, target_id, configuration_version):
+        """One EXACT historical configuration, or None.
+
+        Never falls back to the current or active target. This is the read a
+        future reconciler uses to recover the destination a create may have
+        reached, so a wrong answer here is a wrong answer about a real remote
+        site. A version with no record returns None and must be treated as
+        unknowable, not as unchanged.
+        """
+        return self._internal.get_publishing_target_version(
+            self._workspace_id, target_id, configuration_version)
+
+    def publishing_target_versions(self, target_id):
+        """Every historical configuration for one target, oldest first.
+
+        Diagnostic: lets a caller see that a version is MISSING rather than
+        concluding it never existed. Resolution must use the exact lookup.
+        """
+        return self._internal.publishing_target_versions(self._workspace_id, target_id)
+
     def add_publishing_target(self, target):
         """Insert a target. A target naming another workspace is rejected."""
         return self._internal.add_publishing_target(self._workspace_id, target)

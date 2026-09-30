@@ -55,6 +55,9 @@ EXPECTED_PUBLICATION_TRIGGERS = {
     "task_publication_requests_lifecycle",
     "task_publication_requests_fencing_monotonic",
     "task_publication_requests_may_send_monotonic",
+    # Added by 0013: a new publication may only reference a target configuration
+    # that has an immutable historical record.
+    "task_publication_requests_target_version_recorded",
 }
 EXPECTED_PUBLICATION_INDEXES = {"task_publication_requests_task",
                                 "task_publication_requests_claim"}
@@ -201,7 +204,7 @@ class TestMigration0012:
     def test_migration_0012_applies(self, store):
         versions = [r[0] for r in db_read(
             store, "SELECT version FROM schema_migrations ORDER BY version")]
-        assert versions == list(range(1, 13))
+        assert versions == list(range(1, 14))
 
     def test_table_remains_strict(self, store):
         for table in ("task_publication_requests", "publishing_targets"):
@@ -242,7 +245,12 @@ class TestMigration0012:
                    "AND tbl_name='publishing_targets'")}
         assert triggers == {"publishing_targets_identity_immutable",
                             "publishing_targets_no_delete",
-                            "publishing_targets_configuration_version_guard"}
+                            "publishing_targets_configuration_version_guard",
+                            # 0013 adds a fourth trigger rather than replacing or
+                            # weakening the guard above. All three 0011 triggers
+                            # still exist; this one closes the strictly-increasing
+                            # vs. contiguous gap.
+                            "publishing_targets_configuration_version_contiguous"}
 
     def test_one_active_target_behaviour_is_intact(self, store, workspace, target):
         with pytest.raises(ConstraintViolation):

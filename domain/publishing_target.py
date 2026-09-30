@@ -155,9 +155,86 @@ class PublishingTarget:
         )
 
 
+@dataclass(frozen=True, kw_only=True)
+class PublishingTargetVersion:
+    """One immutable historical configuration of a publishing target.
+
+    A :class:`PublishingTarget` is a *current* pointer: ``base_url``, ``username``
+    and ``credential_reference`` are overwritten in place every time an operator
+    changes the configuration, and only the resulting ``configuration_version``
+    survives. That is correct for execution, which fails closed on drift before any
+    network call, and wrong for reconciliation, which must return to the exact
+    destination a create may have reached long after it was overwritten.
+
+    This type is that durable record. ``(workspace_id, target_id,
+    configuration_version)`` is a permanent resolvable identity for the
+    destination, and this is the one value a future reconciler reads.
+
+    What it deliberately does not carry:
+
+    * ``status`` -- ACTIVE/DISABLED governs whether a NEW publication may execute.
+      It changes no destination field and never moves the version, so putting
+      mutable lifecycle state into an immutable record would only make the record
+      wrong. A reconciler may use a historical configuration whose current target
+      is DISABLED.
+    * secret material -- there is no password, token, or application-password
+      field, for the same reason :class:`PublishingTarget` has none.
+      ``credential_reference`` is a name; only a SecretResolver turns it into a
+      value. Secret rotation behind an unchanged reference therefore needs no new
+      version, which is exactly the existing behaviour.
+    """
+
+    target_id: str
+    workspace_id: str
+    provider_type: PublishingProviderType
+    base_url: str
+    username: str
+    credential_reference: str
+    configuration_version: int
+    created_at: str
+
+    def __post_init__(self):
+        for field in ('target_id', 'workspace_id', 'created_at'):
+            value = getattr(self, field)
+            if type(value) is not str or not value.strip():
+                raise ValueError(f'{field} is required')
+        if not isinstance(self.provider_type, PublishingProviderType):
+            raise ValueError('provider_type must be PublishingProviderType')
+        object.__setattr__(self, 'base_url', validate_base_url(self.base_url))
+        if type(self.username) is not str or not self.username.strip():
+            raise ValueError('username is required')
+        validate_credential_reference(self.credential_reference)
+        if type(self.configuration_version) is not int or self.configuration_version < 1:
+            raise ValueError('configuration_version must be a positive int')
+
+    def as_configuration(self) -> PublishingTarget:
+        """Project this historical record onto a usable destination.
+
+        The returned target is a VALUE, not a stored row: it carries this
+        version's base_url/username/credential_reference, and the historical
+        ``status`` of the current row at read time. A caller that must not invent
+        or refresh anything should use the fields directly; this exists so a
+        caller that already holds a valid :class:`WordPressConnection`-shaped tuple
+        does not have to restate it.
+        """
+        return PublishingTarget(
+            target_id=self.target_id,
+            workspace_id=self.workspace_id,
+            provider_type=self.provider_type,
+            status=TargetStatus.ACTIVE,
+            base_url=self.base_url,
+            username=self.username,
+            credential_reference=self.credential_reference,
+            configuration_version=self.configuration_version,
+            created_at=self.created_at,
+            updated_at=self.created_at,
+        )
+
+
 __all__ = [
     'PublishingProviderType',
     'PublishingTarget',
+    'PublishingTargetVersion',
     'TargetStatus',
     'validate_base_url',
 ]

@@ -458,7 +458,7 @@ class TestRevisionMigration:
     def test_schema_version_advances(self, store):
         with store.factory.connection() as conn:
             versions = [r[0] for r in conn.execute('SELECT version FROM schema_migrations ORDER BY version')]
-            assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+            assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
 
     def test_table_exists(self, store):
         with store.factory.connection() as conn:

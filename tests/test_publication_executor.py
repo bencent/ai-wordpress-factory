@@ -1248,13 +1248,29 @@ class TestExecutionTimingPolicy:
         assert isinstance(FakeSecretResolver(), SecretResolver)
 
 
-# -- 56: no new migration ---------------------------------------------------
+# -- 56: migration boundary -------------------------------------------------
 
 
-def test_no_migration_0013_was_created():
+def test_executor_still_does_not_require_0013():
+    """3C5C forbade a 0013 because publishing execution needs no new migration.
+
+    3C6B then created 0013 for historical publishing-target configuration, which
+    is durable evidence for a FUTURE reconciler. That migration is not consumed by
+    the executor: it adds no column to task_publication_requests, no reconciliation
+    lease, and no attempt counter, so the create path is unchanged by it. The
+    original guard is therefore narrowed rather than deleted -- the executor must
+    still not depend on reconciliation machinery.
+    """
     migrations = sorted((ROOT / "persistence" / "migrations").glob("*.sql"))
-    assert migrations[-1].name == "0012_publication_execution_safety.sql"
-    assert not list((ROOT / "persistence" / "migrations").glob("0013*"))
+    assert migrations[-1].name == "0013_publishing_target_history.sql"
+    assert (ROOT / "persistence/migrations/0012_publication_execution_safety.sql").exists()
+    source = code_of("service/publication_executor.py")
+    # A log line may SAY "reconciliation required" -- that is correct operator
+    # guidance. What must not appear is the executor CALLING reconciliation.
+    for forbidden in ("publishing_target_versions", "get_publishing_target_version",
+                      "find_by_marker", "classify_reconciliation",
+                      "ReconciliationLookupUnresolved", "RemoteReference"):
+        assert forbidden not in source, f"executor must not use {forbidden}"
 
 
 def test_legacy_publisher_is_untouched():
