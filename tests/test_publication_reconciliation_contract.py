@@ -1437,20 +1437,30 @@ class TestExclusions:
         for forbidden in ('application_password', 'content', 'secret'):
             assert forbidden not in text
 
-    def test_no_reconciliation_request_route_was_added(self):
-        """Re-scoped by 8.3-4C, which added a publication READ route.
+    def test_reconciliation_route_does_not_perform_reconciliation(self):
+        """Re-scoped twice: 4C added a read route, 4D added the request route.
 
-        The invariant that still matters is that nothing can ASK for a
-        reconciliation. 4C reads durable state and projects it, so the view may
-        legitimately mention reconciliation -- but it must never call
-        ``request_reconciliation``, which is the one call that arms a worker.
+        3C6C shipped the durable contract and deliberately no route. 4C and 4D then
+        added the routes, so "no route exists" is no longer the invariant. What
+        remains is that the route does exactly one thing -- arm the durable
+        request -- and never performs the reconciliation this module's contract
+        describes.
         """
         source = code_of("service/task_http.py")
-        assert "request_reconciliation" not in source, \
-            "nothing in the HTTP layer may request a reconciliation"
-        app_source = (ROOT / "api" / "app.py").read_text(encoding="utf-8")
-        assert "reconcile" not in app_source.lower(), \
-            "no reconciliation action route may exist"
+        for forbidden in ("PublicationReconciler", "PublicationExecutor", "PublicationWorker",
+                          "publication_bootstrap", "find_by_marker", "WordPressConnection",
+                          "EnvironmentSecretResolver", "import requests"):
+            assert forbidden not in source, \
+                f"the request route must not perform reconciliation: {forbidden}"
+        body = source.split("def request_reconciliation")[1].split("def ")[0]
+        for forbidden in ("reconciliation_requested_at", "reconciliation_owner_id",
+                          "reconciliation_fencing_token", "reconciliation_claimed_at",
+                          "reconciliation_heartbeat_at", "reconciliation_last_attempted_at",
+                          "reconciliation_error_code", "state='INDETERMINATE'",
+                          "may_send_at", "target_id", "claim_publication_for_reconciliation",
+                          "complete_reconciliation_unresolved", "sleep", "wait("):
+            assert forbidden not in body, \
+                f"the route must delegate, not restate or perform: {forbidden}"
 
 
 # -- helper ----------------------------------------------------------------

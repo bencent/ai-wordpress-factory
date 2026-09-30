@@ -1306,18 +1306,23 @@ class TestIsolationAndExclusions:
                           "state='FAILED'", "RECONCILIATION_NOT_FOUND"):
             assert forbidden not in source
 
-    def test_no_reconciliation_request_route_was_added(self):
-        """Re-scoped by 8.3-4C, which added a publication READ route.
+    def test_request_route_does_not_run_the_reconciler(self):
+        """Re-scoped by 8.3-4D, which added the operator request route.
 
-        The read projection may name reconciliation concepts -- CHECKING,
-        STILL_UNCERTAIN -- because that is what an operator sees. What it must
-        never do is ARM a reconciliation.
+        The route may arm durable work and may PROJECT reconciliation concepts
+        into a response. It may not perform a reconciliation: no lookup, no
+        secret, no claim, no wait.
         """
         source = code_of("service/task_http.py")
-        assert "request_reconciliation" not in source
-        assert "claim_publication_for_reconciliation" not in source
-        app_source = (ROOT / "api" / "app.py").read_text(encoding="utf-8")
-        assert "reconcile" not in app_source.lower()
+        for forbidden in ("PublicationReconciler", "PublicationWorker", "find_by_marker",
+                          "classify_reconciliation", "WordPressConnection"):
+            assert forbidden not in source
+        body = source.split("def request_reconciliation")[1].split("def ")[0]
+        for forbidden in ("claim_publication_for_reconciliation", "heartbeat_reconciliation",
+                          "expire_stale_reconciliation", "complete_reconciliation_unresolved",
+                          "resolve_reconciliation_succeeded", "sleep", "wait("):
+            assert forbidden not in body, \
+                f"arming work must not perform it: {forbidden}"
 
     def test_read_layer_does_not_import_execution(self):
         source = code_of("service/task_http.py")

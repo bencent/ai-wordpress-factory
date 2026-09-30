@@ -1032,10 +1032,22 @@ class TestNothingElseChanged:
         assert [m.name for m in migrations][-1] == "0014_publication_reconciliation.sql"
         assert int(migrations[-1].name[:4]) == 14
 
-    def test_no_http_route_added(self):
+    def test_no_worker_route_and_no_background_startup(self):
+        """Re-scoped by 8.3-4C/4D, which added publication routes.
+
+        What 4B guaranteed is that the RUNTIME is a separate explicit CLI mode.
+        Later slices added read and operator-action routes, which is correct; what
+        must still hold is that no HTTP route starts a worker, and that the
+        publication runtime is still only reachable through --publication.
+        """
         source = (ROOT / "api" / "app.py").read_text(encoding="utf-8")
-        for forbidden in ("reconcile", "publication_worker", "publication-status"):
-            assert forbidden not in source
+        for forbidden in ("publication_worker", "publication-status", "build_publication_worker",
+                          "run_publication_worker", "PublicationWorker"):
+            assert forbidden not in source, \
+                f"no route may start or schedule the runtime: {forbidden}"
+        cli = (ROOT / "worker" / "__main__.py").read_text(encoding="utf-8")
+        assert "'--publication'" in cli
+        assert "if args.publication:" in cli
 
     def test_no_ui_modified(self):
         for relative in ("static/index.html", "static/js/api.js", "static/js/app.js",

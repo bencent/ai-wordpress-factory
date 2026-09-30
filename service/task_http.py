@@ -26,6 +26,8 @@ class PublishConflict(ValueError): pass
 class PublishIdempotencyConflict(ValueError): pass
 class PublishTargetUnavailable(ValueError): pass
 class PublicationAlreadyExists(ValueError): pass
+class PublicationNotFound(ValueError): pass
+class ReconciliationConflict(ValueError): pass
 
 def cursor_encode(value):
     return base64.urlsafe_b64encode(json.dumps({'v':1,'position':value},separators=(',',':')).encode()).decode().rstrip('=') if value else None
@@ -209,6 +211,50 @@ class TaskHTTPService:
         task=query.get_task(task_id)
         run=query.get_run(task_id,task.current_run_id) if task.current_run_id else None
         return task_view(task,run)
+    def request_reconciliation(self,task_id,publication_id):
+        """Explicitly ask for one publication to be investigated, and return.
+
+        This arms durable work and returns immediately. It performs NO network
+        call, resolves no secret, constructs no gateway, claims no ownership, and
+        does not wait for a result: the response means "reconcilable work is now
+        due", not "WordPress was checked". The publication worker performs the
+        read-only scan later, on its own schedule.
+
+        Repeated requests need no idempotency key. ``request_reconciliation`` is
+        idempotent by durable state, not by key: already-pending is a success that
+        keeps the ORIGINAL requested_at, and a request made while a worker holds
+        the claim is an accepted no-op that neither steals ownership nor re-arms
+        the row. A key would add a requirement and a new failure mode (a missing
+        header on a harmless double-click) for no behavioural gain, so this route
+        requires none -- unlike POST /publish, which does create a durable row
+        with non-idempotent side effects.
+
+        The publication is identified EXPLICITLY by publication_id. A task can
+        have several publication lineages -- a second content version, or the
+        same content sent to a different target after a re-point -- and picking
+        "the latest" would be a guess about which destination the operator meant.
+
+        A publication that is not visible, or belongs to a different task, or
+        lives in another workspace, all produce the SAME 404. Any difference
+        would let a caller probe for another tenant's resources.
+        """
+        with self.store.workspace_transaction(self.context().workspace_id) as repo:
+            # Task visibility first, so an unknown or foreign task is reported as
+            # TASK_NOT_FOUND before anything publication-specific is revealed.
+            if repo.get_task(task_id) is None: raise TaskNotFound()
+            request=repo.get_publication(publication_id)
+            if request is None or request.task_id!=task_id: raise PublicationNotFound()
+            code=repo.request_reconciliation(publication_id,self.clock().isoformat())
+            if code is not None:
+                # The specific reason is a local precondition, not a remote fact.
+                # It is deliberately not forwarded to the caller: the 409 message
+                # stays generic so no target, workspace or may-send detail leaks.
+                raise ReconciliationConflict(code)
+            # Re-read inside the transaction so the response is derived from the
+            # durable row, never a value the route chose. The same 4C projection
+            # therefore decides CHECK_REQUESTED vs CHECKING vs STILL_UNCERTAIN.
+            request=repo.get_publication(publication_id)
+        return {'publication':publication_view(request)}
     def publications(self,task_id):
         """Every publication lineage recorded for this task, in repository order.
 

@@ -9,7 +9,7 @@ from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException
 from fastapi.concurrency import run_in_threadpool
 from domain.submission import ValidationError,IdempotencyConflict,ProfileError,TaskNotFound,PreviewNotFound,PreviewAssetUnavailable,ApprovalConflict
-from service.task_http import RetryConflict,RetryIdempotencyConflict,RevisionConflict,RevisionIdempotencyConflict,PublishConflict,PublishIdempotencyConflict,PublishTargetUnavailable,PublicationAlreadyExists
+from service.task_http import (RetryConflict,RetryIdempotencyConflict,RevisionConflict,RevisionIdempotencyConflict,PublishConflict,PublishIdempotencyConflict,PublishTargetUnavailable,PublicationAlreadyExists,PublicationNotFound,ReconciliationConflict)
 from persistence.connection import PersistenceError
 from service.http_bootstrap import build_http_service
 
@@ -93,6 +93,13 @@ def create_app(service=None):
         # A configuration problem in the workspace, not a problem with the task.
         PublishTargetUnavailable:(409,'PUBLISH_TARGET_UNAVAILABLE','No active publishing target is configured for this workspace.'),
         PublicationAlreadyExists:(409,'PUBLICATION_ALREADY_EXISTS','This approved content already has a publication for the active target.'),
+        # One 404 for every reason a publication is not addressable through this
+        # task: unknown id, another task's publication, another workspace's. Any
+        # difference between them would let a caller probe for other resources.
+        PublicationNotFound:(404,'PUBLICATION_NOT_FOUND','Publication not found.'),
+        # Deliberately generic. The repository distinguishes several eligibility
+        # failures, and none of that detail belongs in an HTTP body.
+        ReconciliationConflict:(409,'RECONCILIATION_CONFLICT','Publication cannot be reconciled in its current state.'),
         PersistenceError:(503,'SERVICE_UNAVAILABLE','Service is temporarily unavailable.')}
     async def domain_error(request,exc):
         mapping=next(v for k,v in mappings.items() if isinstance(exc,k))
@@ -146,6 +153,15 @@ def create_app(service=None):
         # required a key would invite a client to treat a read as a write.
         boundary(request)
         return await run_in_threadpool(application.publications,task_id)
+    @app.post('/api/v1/tasks/{task_id}/publications/{publication_id}/reconcile')
+    async def reconcile(request:Request,task_id:str,publication_id:str):
+        # Arms durable reconciliation work and returns. No WordPress call, no
+        # secret resolution, no worker invocation, no waiting for a result: the
+        # publication worker performs the read-only scan later.
+        boundary(request)
+        if await body(request)!={}: raise ValidationError('body')
+        return await run_in_threadpool(
+            application.request_reconciliation,task_id,publication_id)
     @app.get('/api/v1/tasks/{task_id}/preview')
     async def preview(request:Request,task_id:str):
         boundary(request)
