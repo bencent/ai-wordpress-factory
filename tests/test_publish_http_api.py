@@ -214,10 +214,19 @@ class TestPublishRoute:
         with store.workspace_reader(workspace) as repo:
             stored = repo.get_publication(body['publication_id'])
         assert stored is not None
+        # 8.3-4C shares one serializer between POST and the read route, so the
+        # POST response gained the three safe diagnostic fields. At creation all
+        # three are null: nothing has run and nothing is uncertain yet.
         assert set(body) == {'publication_id', 'task_id', 'content_version_id', 'content_type',
-                             'state', 'remote_resource_id', 'remote_url', 'created_at', 'updated_at'}
+                             'state', 'remote_resource_id', 'remote_url', 'error_code',
+                             'reconciliation_error_code', 'check_state',
+                             'created_at', 'updated_at'}
         assert body['publication_id'] == stored.publication_id
         assert body['created_at'] == stored.created_at
+        assert body['state'] == 'PENDING'
+        assert body['error_code'] is None
+        assert body['reconciliation_error_code'] is None
+        assert body['check_state'] is None, 'a fresh PENDING publication is not uncertain'
         # Internal columns are not exposed.
         assert 'idempotency_key' not in body and 'workspace_id' not in body
 

@@ -140,6 +140,12 @@ def create_app(service=None):
     async def events(request:Request,task_id:str,after_sequence:int=Query(0,ge=0,le=9223372036854775807)):
         boundary(request,('after_sequence',))
         return await run_in_threadpool(application.events,task_id,after_sequence)
+    @app.get('/api/v1/tasks/{task_id}/publications')
+    async def publications(request:Request,task_id:str):
+        # Read-only. No Idempotency-Key, because nothing is mutated: a GET that
+        # required a key would invite a client to treat a read as a write.
+        boundary(request)
+        return await run_in_threadpool(application.publications,task_id)
     @app.get('/api/v1/tasks/{task_id}/preview')
     async def preview(request:Request,task_id:str):
         boundary(request)

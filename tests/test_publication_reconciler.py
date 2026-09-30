@@ -1306,9 +1306,23 @@ class TestIsolationAndExclusions:
                           "state='FAILED'", "RECONCILIATION_NOT_FOUND"):
             assert forbidden not in source
 
-    def test_no_http_route_was_added(self):
+    def test_no_reconciliation_request_route_was_added(self):
+        """Re-scoped by 8.3-4C, which added a publication READ route.
+
+        The read projection may name reconciliation concepts -- CHECKING,
+        STILL_UNCERTAIN -- because that is what an operator sees. What it must
+        never do is ARM a reconciliation.
+        """
         source = code_of("service/task_http.py")
-        for forbidden in ("reconcil", "Reconcil"):
+        assert "request_reconciliation" not in source
+        assert "claim_publication_for_reconciliation" not in source
+        app_source = (ROOT / "api" / "app.py").read_text(encoding="utf-8")
+        assert "reconcile" not in app_source.lower()
+
+    def test_read_layer_does_not_import_execution(self):
+        source = code_of("service/task_http.py")
+        for forbidden in ("PublicationExecutor", "PublicationReconciler", "PublicationWorker",
+                          "publication_bootstrap", "find_by_marker"):
             assert forbidden not in source
 
     def test_no_config_or_environment_dependency(self):

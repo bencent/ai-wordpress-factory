@@ -6,6 +6,8 @@ from uuid import UUID
 from domain.submission import ValidationError,TaskNotFound,SubmissionProfile,ProfileError,PreviewNotFound,PreviewAssetUnavailable,ApprovalConflict
 from domain.contracts import Status
 from domain.failures import SAFE_RUN_ERROR_CODES
+from domain.publication import (PublicationState, SAFE_PUBLICATION_ERROR_CODES,
+                                SAFE_RECONCILIATION_ERROR_CODES)
 from domain.preview import PreviewAssetKind
 from service.query import ScopedQueryService
 from service.submission import ScopedTaskSubmissionService
@@ -83,13 +85,90 @@ def preview_view(stored):
     return {'preview_id':record.preview_id,'task_id':record.task_id,'run_id':record.run_id,
         'content_version_id':record.content_version_id,'created_at':record.created_at,'assets':assets}
 
+def _safe_publication_code(value, vocabulary):
+    """Pass a persisted code only if it belongs to the known-safe vocabulary.
+
+    The two codes are constrained differently by storage, and the difference
+    matters. ``reconciliation_error_code`` is checked against its vocabulary by a
+    SQL CHECK *and* re-validated when the record is decoded, so an unexpected
+    value cannot reach this function. ``error_code`` is only constrained to a
+    1-64 character non-blank string, so a row written outside the repository
+    could hold arbitrary text.
+
+    Rather than trust that, the view filters against the same frozensets the
+    writers use. An unrecognised value is reported as absent, because the
+    alternative is echoing a string that reached the database by some path
+    nobody authorised -- and an API response is the one place that string would
+    become visible.
+    """
+    if value is None:
+        return None
+    return value if value in vocabulary else None
+
+
+def reconciliation_check_state(request):
+    """Project durable reconciliation facts into a product-level check state.
+
+    A VIEW projection, not a persisted state: nothing is stored, and the backend
+    vocabulary remains the authority. The client needs to know "should I offer to
+    check again, is a check running, did one already fail to prove anything", and
+    none of that is answerable from a single timestamp.
+
+    Precedence, and why it is this order:
+
+    1. ``reconciliation_owner_id`` -> CHECKING. An owner is the only proof a
+       check is genuinely running, and it outranks everything else.
+    2. ``reconciliation_requested_at`` -> CHECK_REQUESTED. Work is durably due.
+    3. ``reconciliation_last_attempted_at`` -> STILL_UNCERTAIN. A check ran and
+       could not prove anything.
+    4. otherwise -> UNCERTAIN.
+
+    CHECKING deliberately precedes CHECK_REQUESTED even though the 3C6C claim
+    consumes the request, so a claimed row has a NULL request. If both were ever
+    set -- by a legacy row, or by a write path that did not clear the flag -- the
+    row is being checked RIGHT NOW, and reporting it as merely queued would tell
+    the operator to wait for work that is already in flight.
+
+    ``reconciliation_last_attempted_at`` is used rather than
+    ``reconciliation_error_code`` because the code records WHY an attempt failed
+    while the timestamp records WHETHER one happened, and only the second answers
+    the product question.
+
+    Lifecycle wins outright: a resolved publication is not "uncertain" no matter
+    what reconciliation fields linger on the row. There is no scenario where a
+    SUCCEEDED publication should be presented as still being checked.
+    """
+    if request.state is not PublicationState.INDETERMINATE:
+        return None
+    if request.reconciliation_owner_id is not None:
+        return 'CHECKING'
+    if request.reconciliation_requested_at is not None:
+        return 'CHECK_REQUESTED'
+    if request.reconciliation_last_attempted_at is not None:
+        return 'STILL_UNCERTAIN'
+    return 'UNCERTAIN'
+
+
 def publication_view(request):
-    # Remote columns stay null until a future executor records a confirmed outcome.
-    # No workspace, key, or run lineage is exposed to the caller.
+    # The single serializer for a publication, shared by POST /publish and by the
+    # read route. Two competing serializers would be one more thing to keep in
+    # step, and the POST response would silently omit whatever the GET added.
+    #
+    # Remote columns stay null until an executor records a confirmed outcome.
+    # No workspace, key, run lineage, target, or ownership is exposed: this is a
+    # product view of one publication's outcome, not a database projection.
     return {'publication_id':request.publication_id,'task_id':request.task_id,
         'content_version_id':request.content_version_id,'content_type':request.content_type.value,
         'state':request.state.value,'remote_resource_id':request.remote_resource_id,
-        'remote_url':request.remote_url,'created_at':request.created_at,'updated_at':request.updated_at}
+        'remote_url':request.remote_url,
+        # Both codes pass through the same vocabulary the writers use; an
+        # unrecognised value is reported as absent rather than echoed.
+        'error_code':_safe_publication_code(request.error_code,
+                                            SAFE_PUBLICATION_ERROR_CODES),
+        'reconciliation_error_code':_safe_publication_code(
+            request.reconciliation_error_code, SAFE_RECONCILIATION_ERROR_CODES),
+        'check_state':reconciliation_check_state(request),
+        'created_at':request.created_at,'updated_at':request.updated_at}
 
 class TaskHTTPService:
     def __init__(self,store,resolver,*,context_provider=default_workspace_context,clock=None,preview_base_dir="artifacts/previews"):
@@ -130,6 +209,25 @@ class TaskHTTPService:
         task=query.get_task(task_id)
         run=query.get_run(task_id,task.current_run_id) if task.current_run_id else None
         return task_view(task,run)
+    def publications(self,task_id):
+        """Every publication lineage recorded for this task, in repository order.
+
+        Read-only. The task is resolved first through the workspace-scoped query
+        so an unknown task and a task owned by another workspace are
+        indistinguishable -- the same 404 either way, with no existence leak.
+
+        ALL lineages are returned, and the repository's own ordering is kept
+        untouched. A task can legitimately have several: a second content version,
+        or the same content version sent to a different publishing target after an
+        operator re-pointed the workspace. Collapsing them to one "latest" row
+        would hide a fact an operator needs -- that a post went to two different
+        destinations -- and would be a guess, because "latest" is not a stable
+        identity here.
+        """
+        with self.store.workspace_reader(self.context().workspace_id) as repo:
+            if repo.get_task(task_id) is None: raise TaskNotFound()
+            requests=repo.publications_for_task(task_id)
+        return {'publications':[publication_view(r) for r in requests]}
     def list(self,limit=50,cursor=None):
         page=ScopedQueryService(self.store,self.context()).recent_tasks(limit=limit,cursor=cursor_decode(cursor))
         return {'tasks':[task_view(t) for t in page.tasks],'next_cursor':cursor_encode(page.next_cursor)}

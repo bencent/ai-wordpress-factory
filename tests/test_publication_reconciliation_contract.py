@@ -1437,10 +1437,20 @@ class TestExclusions:
         for forbidden in ('application_password', 'content', 'secret'):
             assert forbidden not in text
 
-    def test_no_http_route_was_added(self):
+    def test_no_reconciliation_request_route_was_added(self):
+        """Re-scoped by 8.3-4C, which added a publication READ route.
+
+        The invariant that still matters is that nothing can ASK for a
+        reconciliation. 4C reads durable state and projects it, so the view may
+        legitimately mention reconciliation -- but it must never call
+        ``request_reconciliation``, which is the one call that arms a worker.
+        """
         source = code_of("service/task_http.py")
-        for forbidden in ("reconcil", "Reconcil"):
-            assert forbidden not in source
+        assert "request_reconciliation" not in source, \
+            "nothing in the HTTP layer may request a reconciliation"
+        app_source = (ROOT / "api" / "app.py").read_text(encoding="utf-8")
+        assert "reconcile" not in app_source.lower(), \
+            "no reconciliation action route may exist"
 
 
 # -- helper ----------------------------------------------------------------
