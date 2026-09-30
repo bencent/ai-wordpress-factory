@@ -26,6 +26,7 @@ import ast
 import contextlib
 import logging
 import os
+import re
 import signal
 import sqlite3
 import sys
@@ -1054,8 +1055,27 @@ class TestNothingElseChanged:
                          "static/js/state.js", "static/css/app.css"):
             path = ROOT / relative
             assert path.is_file()
-        # Publication API calls must not exist in the client yet.
-        assert "publish" not in (ROOT / "static/js/api.js").read_text(encoding="utf-8")
+        # 4E2 added the publication UI, so "the client has no publish call" is no longer
+        # the invariant. What must remain true is that the client cannot drive, observe
+        # or impersonate this worker: it may only read the durable publication records.
+        client = (ROOT / "static/js/api.js").read_text(encoding="utf-8")
+        controller = (ROOT / "static/js/app.js").read_text(encoding="utf-8")
+        assert "publishTask:" in client
+
+        def code_only(text):
+            """Strip comments so prose about safety cannot satisfy or trip a code guard."""
+            text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+            return re.sub(r"//[^\n]*", "", text)
+
+        client_code, controller_code = code_only(client), code_only(controller)
+        for forbidden in ("--publication", "publication_loop", "subprocess", "worker_loop",
+                          "WordPressGateway", "WordPressConnection", "wp-json", "localStorage",
+                          "innerHTML", "credential", "application_password"):
+            assert forbidden not in client_code, forbidden
+            assert forbidden not in controller_code, forbidden
+        # No worker liveness may be invented from publication state.
+        for forbidden in ("worker_offline", "publisher_offline", "publication worker healthy"):
+            assert forbidden not in controller_code, forbidden
 
     def test_no_publishing_target_settings_added(self):
         source = code_of("service/publication_bootstrap.py")

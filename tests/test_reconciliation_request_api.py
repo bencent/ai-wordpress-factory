@@ -1095,9 +1095,22 @@ class TestNothingElseChanged:
         assert 'idempotency-key' not in body.lower()
 
     def test_static_is_untouched(self):
+        # 4E2 is the slice that finally gives these routes a UI, so "the client contains
+        # no reconcile or publish call" is no longer the invariant -- that was true only
+        # while 4E owned the UI alone. The contract 4E actually fixed, and that the client
+        # must now honour, is the key asymmetry: reconciliation is idempotent by durable
+        # state and takes no key, while publish creates a durable row and must take one.
+        import re as _re
         source = (ROOT / "static/js/api.js").read_text(encoding="utf-8")
-        for forbidden in ('reconcile', 'publish'):
-            assert forbidden not in source, "4E owns the UI"
+        publish = _re.search(r"publishTask:.*?\n    \}\),", source, _re.S).group(0)
+        reconcile = _re.search(r"requestReconciliation:.*?\n    \}\),", source, _re.S).group(0)
+        assert publish.count("'Idempotency-Key'") == 1, "publish must carry exactly one key"
+        assert "Idempotency-Key" not in reconcile, "reconcile must carry no key"
+        assert _re.search(r"requestReconciliation:.*?body: '\{\}',", source, _re.S)
+        # The client cannot invent a second durable surface of its own.
+        for forbidden in ("WordPressGateway", "subprocess", "--publication", "localStorage",
+                          "innerHTML"):
+            assert forbidden not in source, forbidden
 
     def test_no_retry_or_new_lifecycle_state(self):
         from domain.publication import PublicationState

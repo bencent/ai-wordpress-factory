@@ -150,6 +150,19 @@
             </div>
             <div id="review-message" class="form-message" role="status" aria-live="polite"></div>
           </div>
+          <section id="publication-region" class="publication-region" aria-labelledby="publication-title" hidden>
+            <div class="subsection-heading">
+              <h4 id="publication-title">發布紀錄</h4>
+              <span id="publication-sync" class="muted">等待同步</span>
+            </div>
+            <div id="publish-actions" class="form-actions" hidden>
+              <button id="publish-task" class="primary-button" type="button">發布</button>
+              <button id="resubmit-publish" class="text-button" type="button" hidden>使用相同提交識別重新送出</button>
+            </div>
+            <div id="publication-message" class="form-message" role="status" aria-live="polite"></div>
+            <div id="publication-empty" class="quiet-state">尚無發布紀錄</div>
+            <div id="publication-list" class="publication-list" hidden></div>
+          </section>
           <div id="retry-actions" class="form-actions" hidden>
             <button id="retry-task" class="primary-button" type="button">以相同需求重試</button>
             <button id="retry-cancel" class="text-button" type="button" hidden>取消重試</button>

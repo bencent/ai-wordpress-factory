@@ -15,6 +15,16 @@ export function createState(initial = {}) {
     revisionOpen: false,
     reviewMessage: '',
     reviewMessageError: false,
+    // Publication. publications is always the server's own list, in the server's own
+    // order. reconcileIntents is keyed by publication_id so an in-flight request disables
+    // only its own card, never a sibling lineage.
+    publications: [],
+    publicationsLoading: false,
+    publicationsError: null,
+    publishIntent: null,
+    reconcileIntents: {},
+    publicationMessage: '',
+    publicationMessageError: false,
     draft: {content_type: 'POST', topic: '', brief: '', target_audience: '', page_purpose: ''},
     submission: {phase: 'idle', key: null, body: null, task: null, message: ''},
     tasks: [],

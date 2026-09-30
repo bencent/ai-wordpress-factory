@@ -332,28 +332,10 @@ h3 {
   border-color: #a0d8b0;
 }
 
-.status-chip[data-status="PUBLISHING"] {
-  background: #e8f0f5;
-  color: #2a5a8a;
-  border-color: #a0b8d8;
-}
-
-.status-chip[data-status="PUBLISHED"] {
-  background: #e0f5e0;
-  color: #1a6a1a;
-  border-color: #a0d0a0;
-}
-
 .status-chip[data-status="FAILED"] {
   background: #f8e8e8;
   color: #9b3030;
   border-color: #e0b0b0;
-}
-
-.status-chip[data-status="PUBLISH_FAILED"] {
-  background: #f8e0e0;
-  color: #8a2020;
-  border-color: #e0a0a0;
 }
 
 .status-chip[data-status="WORKER_LOST"] {
@@ -713,6 +695,108 @@ fieldset:disabled {
 
 .revision-fields .form-actions {
   margin-top: 8px;
+}
+
+/* Publication & Recovery. Publication state is its own vocabulary, so it gets its own
+   badge rather than the Task status chip: a publication is never a Task projection. */
+.publication-region {
+  margin-top: 16px;
+  padding: 16px;
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  background: var(--surface-muted);
+}
+
+.publication-region h4 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.publication-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.publication-card {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.publication-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.publication-kind {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.publication-state {
+  padding: 2px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.publication-state[data-publication-state="SUCCEEDED"] {
+  background: #e0f5e8;
+  color: #1a7a3a;
+  border-color: #a0d8b0;
+}
+
+.publication-state[data-publication-state="FAILED"] {
+  background: #f8e8e8;
+  color: #9b3030;
+  border-color: #e0b0b0;
+}
+
+.publication-state[data-publication-state="INDETERMINATE"] {
+  background: #fdf3e0;
+  color: #8a5a22;
+  border-color: #dcc79a;
+}
+
+.publication-state[data-publication-state="IN_PROGRESS"] {
+  background: #e8f0f5;
+  color: #2a5a8a;
+  border-color: #a0b8d8;
+}
+
+.publication-detail,
+.publication-time {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.publication-card .form-actions {
+  margin-top: 4px;
+}
+
+/* The anchor is a link, not a button, but it shares the action row's geometry so the
+   card does not reflow when a link appears or disappears between polls. */
+.publication-card a.text-button {
+  display: inline-flex;
+  align-items: center;
+  min-height: 38px;
+  text-decoration: none;
 }
 
 .panel-side {

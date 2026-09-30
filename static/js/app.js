@@ -14,6 +14,8 @@ let listInFlight = false;
 let eventInFlightGeneration = null;
 let detailGeneration = 0;
 let eventGeneration = 0;
+let publicationGeneration = 0;
+let publicationInFlightGeneration = null;
 
 function element(tag, className, text) {
   const node = document.createElement(tag);
@@ -170,10 +172,14 @@ function renderDetail(next) {
 // Human Review. Task detail status is the only eligibility signal: events, run
 // attempt, content type and the task list are never consulted. latest_content_version_id
 // is sent verbatim; when it is missing neither action is enabled and no id is invented.
+function taskVersionId(detail) {
+  const value = detail?.latest_content_version_id;
+  return typeof value === 'string' && value ? value : null;
+}
+
 function reviewVersionId(detail) {
   if (detail?.status !== 'AWAITING_APPROVAL') return null;
-  const value = detail.latest_content_version_id;
-  return typeof value === 'string' && value ? value : null;
+  return taskVersionId(detail);
 }
 
 function reviewTarget() {
@@ -261,6 +267,182 @@ function renderReview(next) {
   elements['review-message'].classList.toggle('is-error', failed);
 }
 
+// Publication & Recovery.
+//
+// PublicationRequest state is the only authority for publication truth. Task status is
+// never consulted, and no lineage is ever collapsed or reordered: a task can hold
+// several (a second content version, or the same version sent elsewhere after a
+// re-point), and "the latest one" would be a guess about which destination the operator
+// meant. Every card carries its own publication_id and nothing is derived from position.
+const PUBLICATION_STATE_COPY = {
+  PENDING: {title: '等待發布', detail: '已排入發布佇列。'},
+  IN_PROGRESS: {title: '正在發布', detail: '內容正在送出至網站。'},
+  SUCCEEDED: {title: '已發布', detail: null},
+  FAILED: {title: '發布失敗', detail: null},
+  INDETERMINATE: {title: '無法確認發布結果', detail: '目前無法在網站上確認這次發布結果。'},
+};
+
+// check_state is a view projection that is null for every non-INDETERMINATE publication.
+const CHECK_STATE_COPY = {
+  UNCERTAIN: {title: '無法確認發布結果', detail: '目前無法在網站上確認這次發布結果。', reconcilable: true},
+  CHECK_REQUESTED: {title: '已排入發布結果確認', detail: '系統將於稍後檢查網站上的發布紀錄。', reconcilable: false},
+  CHECKING: {title: '正在確認發布結果', detail: '系統正在查詢網站上的發布紀錄。', reconcilable: false},
+  STILL_UNCERTAIN: {title: '仍無法確認發布結果', detail: '上次確認仍無法證明這次發布的最終結果。', reconcilable: true},
+};
+
+// A deliberately small whitelist of product-level explanations. Target, credential and
+// configuration codes are excluded on purpose, and anything unlisted shows no technical
+// detail at all rather than echoing a raw code.
+const PUBLICATION_ERROR_COPY = {
+  AUTHENTICATION: '網站驗證未通過。',
+  PERMISSION: '網站拒絕了這次發布。',
+  RATE_LIMIT: '網站暫時限制了發布頻率。',
+  CONNECTION_NOT_ESTABLISHED: '無法連線到網站。',
+  CONNECTION_LOST: '與網站的連線中斷。',
+  READ_TIMEOUT: '讀取網站回應逾時。',
+  TIMEOUT: '與網站連線逾時。',
+  UNAVAILABLE: '網站暫時無法使用。',
+};
+
+function contentTypeLabel(value) {
+  if (value === 'POST') return '文章';
+  if (value === 'PAGE') return '頁面';
+  return '內容';
+}
+
+// "發布失敗" is reachable from exactly one place: state === 'FAILED'. Every other
+// outcome, including an unrecognised check_state, is presented as uncertainty.
+function publicationPresentation(publication) {
+  const state = publication?.state;
+  const base = PUBLICATION_STATE_COPY[state];
+  if (!base) return {title: '發布狀態未知', detail: null, reconcilable: false, badge: state || 'UNKNOWN'};
+  if (state !== 'INDETERMINATE') {
+    const detail = state === 'FAILED' ? PUBLICATION_ERROR_COPY[publication.error_code] || null : base.detail;
+    return {title: base.title, detail, reconcilable: false, badge: state};
+  }
+  const check = CHECK_STATE_COPY[publication.check_state];
+  if (!check) {
+    // Fail safe: an unknown or missing check_state is never treated as licence to re-arm.
+    return {title: PUBLICATION_STATE_COPY.INDETERMINATE.title, detail: PUBLICATION_STATE_COPY.INDETERMINATE.detail, reconcilable: false, badge: state};
+  }
+  return {title: check.title, detail: check.detail, reconcilable: check.reconcilable, badge: state};
+}
+
+function publishTarget(next = state.snapshot) {
+  if (next.taskDetail?.status !== 'APPROVED') return null;
+  const contentVersionId = taskVersionId(next.taskDetail);
+  if (!contentVersionId || !next.selectedTaskId) return null;
+  return {taskId: next.selectedTaskId, contentVersionId};
+}
+
+function matchedPublishIntent(next = state.snapshot) {
+  const target = publishTarget(next);
+  const intent = next.publishIntent;
+  if (!intent || !target || intent.taskId !== target.taskId) return null;
+  return intent.contentVersionId === target.contentVersionId ? intent : null;
+}
+
+// Lineage uniqueness is a durable backend fact, so the suppression is read from durable
+// publication rows -- never inferred from Task status, and never offering a republish.
+function publishedForVersion(publications, contentVersionId) {
+  return publications.some((publication) => publication?.content_version_id === contentVersionId);
+}
+
+function publicationCard(publication, index, next) {
+  const kind = contentTypeLabel(publication.content_type);
+  const view = publicationPresentation(publication);
+  const card = element('article', 'publication-card');
+  card.dataset.publicationId = publication.publication_id;
+
+  const head = element('div', 'publication-head');
+  const badge = element('span', 'publication-state', view.title);
+  badge.dataset.publicationState = view.badge;
+  head.append(element('span', 'publication-kind', kind), badge);
+
+  const detail = view.detail ? element('p', 'publication-detail', view.detail) : null;
+  const time = element('p', 'publication-time', `建立 ${formatTime(publication.created_at)} · 更新 ${formatTime(publication.updated_at)}`);
+
+  const actions = element('div', 'form-actions');
+  // A remote link exists only when the executor recorded one. The publishing target's
+  // base URL is deliberately not in the safe view, so there is nothing to fall back to.
+  if (publication.state === 'SUCCEEDED' && typeof publication.remote_url === 'string' && publication.remote_url) {
+    const link = element('a', 'text-button', `查看已發布${kind}`);
+    link.href = publication.remote_url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    actions.append(link);
+  }
+  if (view.reconcilable) {
+    const inFlight = next.reconcileIntents[publication.publication_id]?.taskId === next.selectedTaskId;
+    const button = element('button', 'text-button', '重新確認發布結果');
+    button.type = 'button';
+    button.disabled = Boolean(inFlight);
+    // Sibling lineages render several of these, so each needs its own accessible name.
+    button.setAttribute('aria-label', `重新確認發布結果（${kind}，第 ${index + 1} 筆發布紀錄）`);
+    // Closes over this card's own id. Nothing here can address a sibling lineage.
+    button.addEventListener('click', () => requestReconciliation(publication.publication_id));
+    actions.append(button);
+  }
+
+  card.append(head);
+  if (detail) card.append(detail);
+  card.append(time);
+  if (actions.childElementCount) card.append(actions);
+  return card;
+}
+
+function renderPublications(next) {
+  const region = elements['publication-region'];
+  const list = Array.isArray(next.publications) ? next.publications : [];
+  const target = publishTarget(next);
+  const intent = matchedPublishIntent(next);
+  const suppressed = Boolean(target) && publishedForVersion(list, target.contentVersionId);
+  const versionUnavailable = next.taskDetail?.status === 'APPROVED' && !taskVersionId(next.taskDetail);
+  const visible = Boolean(next.selectedTaskId)
+    && (list.length > 0 || Boolean(target) || Boolean(intent) || versionUnavailable);
+  region.hidden = !visible;
+
+  const submitting = intent?.phase === 'submitting';
+  const uncertain = intent?.phase === 'uncertain';
+  const offerPublish = Boolean(intent) || (Boolean(target) && !suppressed);
+  elements['publish-actions'].hidden = !offerPublish;
+  elements['publish-task'].hidden = Boolean(intent);
+  elements['publish-task'].disabled = submitting || !target;
+  elements['publish-task'].textContent = submitting
+    ? '發布中…'
+    : `發布${target ? contentTypeLabel(next.taskDetail?.content_type) : ''}`;
+  elements['resubmit-publish'].hidden = !uncertain;
+  elements['resubmit-publish'].disabled = submitting;
+
+  let message = next.publicationMessage || '';
+  let failed = Boolean(next.publicationMessageError);
+  if (!message) {
+    if (submitting) message = '正在送出發布要求…';
+    else if (uncertain) {
+      message = '無法確認發布要求是否已送出。';
+      failed = true;
+    } else if (versionUnavailable) {
+      message = '目前無法取得可發布的內容版本，請重新載入後再試。';
+      failed = true;
+    } else if (suppressed) message = '這個內容已有發布紀錄，發布狀態請見下方。';
+    else if (next.publicationsError) {
+      message = next.publicationsError;
+      failed = true;
+    } else if (next.publicationsLoading && list.length === 0) message = '正在載入發布紀錄…';
+  }
+  elements['publication-message'].textContent = message;
+  elements['publication-message'].classList.toggle('is-error', failed);
+
+  elements['publication-sync'].textContent = next.publicationsLoading
+    ? '同步中'
+    : next.publicationsError ? '無法同步' : '已同步';
+  elements['publication-empty'].hidden = next.publicationsLoading || list.length > 0;
+  elements['publication-list'].hidden = list.length === 0;
+  // Server order, exactly as returned. No sort, no reverse, no collapsing.
+  replaceChildren(elements['publication-list'],
+    list.length ? list.map((publication, index) => publicationCard(publication, index, next)) : []);
+}
+
 function render(next) {
   const connection = elements['connection-status'];
   const message = elements['system-message'];
@@ -289,6 +471,7 @@ function render(next) {
   renderTasks(next);
   renderDetail(next);
   renderReview(next);
+  renderPublications(next);
 }
 
 function safeMessage(error, fallback = '目前無法完成操作，請稍後再試。') {
@@ -300,6 +483,15 @@ function safeMessage(error, fallback = '目前無法完成操作，請稍後再�
   if (error instanceof ApiError && error.code === 'APPROVAL_CONFLICT') return '目前狀態無法核准此任務，請重新載入後再試。';
   if (error instanceof ApiError && error.code === 'REVISION_CONFLICT') return '目前狀態無法提出修改要求，請重新載入後再試。';
   if (error instanceof ApiError && error.code === 'TASK_NOT_FOUND') return '找不到這個任務，可能已被移除。';
+  // Publication & Recovery. Each of these says what the operator should do next and
+  // nothing about the workspace. No target, credential, configuration or idempotency
+  // detail is ever named, because the safe view does not contain any and the error
+  // body must not become a back channel for it.
+  if (error instanceof ApiError && error.code === 'PUBLISH_CONFLICT') return '目前狀態無法發布，請重新載入後再試。';
+  if (error instanceof ApiError && error.code === 'PUBLICATION_ALREADY_EXISTS') return '這個內容已有發布紀錄，已重新載入發布狀態。';
+  if (error instanceof ApiError && error.code === 'PUBLISH_TARGET_UNAVAILABLE') return '目前尚未設定可用的發布網站。';
+  if (error instanceof ApiError && error.code === 'PUBLICATION_NOT_FOUND') return '找不到這筆發布紀錄，已重新載入發布狀態。';
+  if (error instanceof ApiError && error.code === 'RECONCILIATION_CONFLICT') return '目前狀態無法重新確認發布結果，已重新載入發布狀態。';
   return fallback;
 }
 
@@ -493,6 +685,108 @@ function cancelReview() {
   state.set({approveIntent: null, revisionIntent: null, revisionOpen: false, reviewMessage: '已取消未確認的送出。', reviewMessageError: false});
 }
 
+function clearPublicationNotice() {
+  return {publicationMessage: '', publicationMessageError: false};
+}
+
+// A durable publication_id is the identity from this point on. publishIntent only ever
+// named the request we sent, and is cleared the moment a response confirms it.
+function mergePublication(publication) {
+  if (!publication?.publication_id) return;
+  // A late response for a task the operator already left must never repaint the task
+  // they are looking at now. The view carries its own task_id, so the check is exact.
+  if (publication.task_id && publication.task_id !== state.snapshot.selectedTaskId) return;
+  const current = state.snapshot.publications;
+  const index = current.findIndex((item) => item?.publication_id === publication.publication_id);
+  if (index === -1) {
+    state.set({publications: [...current, publication]});
+    return;
+  }
+  const next = [...current];
+  next[index] = publication;
+  state.set({publications: next});
+}
+
+function clearReconcileIntent(publicationId) {
+  const current = state.snapshot.reconcileIntents;
+  if (!(publicationId in current)) return;
+  const next = {...current};
+  delete next[publicationId];
+  state.set({reconcileIntents: next});
+}
+
+// The publication read is the authority. A late response for a task the operator has
+// already left claims no selection and repaints nothing.
+async function settlePublications(taskId, notice) {
+  if (state.snapshot.selectedTaskId !== taskId) return;
+  await loadPublications({taskId});
+  state.set(notice);
+}
+
+async function publishSelectedTask({reuse = false} = {}) {
+  const current = state.snapshot;
+  const target = publishTarget(current);
+  if (!target) return;
+  const {taskId, contentVersionId} = target;
+  const intent = matchedPublishIntent(current);
+  if (intent?.phase === 'submitting') return;
+  if (reuse && intent?.phase !== 'uncertain') return;
+  if (!reuse && publishedForVersion(current.publications, contentVersionId)) return;
+  // One key per logical publish, reused only across an uncertain transport result for
+  // this exact task + version. A revised or re-published version always mints a new key.
+  const key = intent?.phase === 'uncertain' ? intent.key : crypto.randomUUID();
+  state.set({publishIntent: {taskId, contentVersionId, key, phase: 'submitting'}, ...clearPublicationNotice()});
+  try {
+    const publication = await api.publishTask(taskId, contentVersionId, key);
+    state.set({publishIntent: null, message: '已送出發布要求。'});
+    mergePublication(publication);
+    await settlePublications(taskId, {publicationMessage: '已送出發布要求。', publicationMessageError: false});
+  } catch (error) {
+    if (error instanceof NetworkError || error instanceof TimeoutError) {
+      // The durable row may already exist, so this is not a failure and must never be
+      // shown as one. The key is kept so a retry is the same logical publish, not a
+      // second one that would collide with the backend's publication lineage.
+      state.set({publishIntent: {taskId, contentVersionId, key, phase: 'uncertain'}});
+      return;
+    }
+    // A definitive server answer. No key is offered again: a retry would either replay
+    // the same durable intent or collide with the lineage, and the read is the truth.
+    const copy = safeMessage(error, '目前無法送出發布要求。');
+    const informational = error instanceof ApiError && error.code === 'PUBLICATION_ALREADY_EXISTS';
+    state.set({publishIntent: null, message: copy});
+    await settlePublications(taskId, {publicationMessage: copy, publicationMessageError: !informational});
+  }
+}
+
+async function requestReconciliation(publicationId) {
+  const current = state.snapshot;
+  const taskId = current.selectedTaskId;
+  if (!taskId || typeof publicationId !== 'string' || !publicationId) return;
+  // One in-flight reconciliation per publication, and never for a state that the
+  // durable contract does not consider reconcilable.
+  if (current.reconcileIntents[publicationId]?.taskId === taskId) return;
+  const publication = current.publications.find((item) => item?.publication_id === publicationId);
+  if (!publicationPresentation(publication).reconcilable) return;
+  state.set({reconcileIntents: {...current.reconcileIntents, [publicationId]: {taskId, publicationId, phase: 'submitting'}}});
+  try {
+    const result = await api.requestReconciliation(taskId, publicationId);
+    clearReconcileIntent(publicationId);
+    // The returned view is the server's own projection, so CHECK_REQUESTED vs CHECKING
+    // is never forced here; the refresh below re-derives it from the durable row.
+    mergePublication(result?.publication);
+    await settlePublications(taskId, {publicationMessage: '已送出重新確認要求，發布狀態已重新載入。', publicationMessageError: false});
+  } catch (error) {
+    // No Idempotency-Key is involved and the call is durable-state idempotent, so an
+    // uncertain transport is resolved by reading, never by repeating the request.
+    const uncertain = error instanceof NetworkError || error instanceof TimeoutError;
+    const copy = uncertain
+      ? '無法確認重新確認要求是否已送出，已重新載入發布狀態。'
+      : safeMessage(error, '目前無法重新確認發布結果，已重新載入發布狀態。');
+    clearReconcileIntent(publicationId);
+    await settlePublications(taskId, {publicationMessage: copy, publicationMessageError: true});
+  }
+}
+
 function mergeTasks(incoming, {append = false, nextCursor = state.snapshot.nextCursor} = {}) {
   const existing = state.snapshot.tasks;
   const combined = append ? [...existing, ...incoming] : [...incoming, ...existing];
@@ -521,14 +815,23 @@ async function selectTask(taskId) {
   if (!taskId) return;
   const generation = ++detailGeneration;
   ++eventGeneration;
-  state.set({selectedTaskId: taskId, taskDetail: null, events: [], lastSequence: 0, eventsLoading: true, ...clearReviewNotice()});
+  const publicationGen = ++publicationGeneration;
+  state.set({
+    selectedTaskId: taskId, taskDetail: null, events: [], lastSequence: 0, eventsLoading: true,
+    // Clear the previous task's publications the instant the selection changes, and drop
+    // the transient in-flight flags with them. publishIntent deliberately survives: an
+    // uncertain publish must still be retryable when the operator comes back here.
+    publications: [], publicationsLoading: false, publicationsError: null, reconcileIntents: {},
+    ...clearReviewNotice(), ...clearPublicationNotice(),
+  });
   const detailPromise = api.getTask(taskId).then((detail) => {
     if (generation === detailGeneration && state.snapshot.selectedTaskId === taskId) state.set({taskDetail: detail});
   }).catch(() => {
     if (generation === detailGeneration) state.set({message: '任務內容暫時無法載入。'});
   });
   const eventPromise = loadEvents({taskId, generation: eventGeneration, afterSequence: 0});
-  await Promise.allSettled([detailPromise, eventPromise]);
+  const publicationPromise = loadPublications({taskId, generation: publicationGen});
+  await Promise.allSettled([detailPromise, eventPromise, publicationPromise]);
 }
 
 async function loadEvents({taskId = state.snapshot.selectedTaskId, generation = eventGeneration, afterSequence = state.snapshot.lastSequence} = {}) {
@@ -546,6 +849,28 @@ async function loadEvents({taskId = state.snapshot.selectedTaskId, generation = 
     if (generation === eventGeneration) state.set({eventsLoading: false, message: '事件紀錄暫時無法同步。'});
   } finally {
     if (eventInFlightGeneration === generation) eventInFlightGeneration = null;
+  }
+}
+
+// Publication read. Mirrors the events guard: one in-flight request per generation, and
+// a response for a task that is no longer selected is discarded rather than painted.
+async function loadPublications({taskId = state.snapshot.selectedTaskId, generation = publicationGeneration} = {}) {
+  if (!taskId || publicationInFlightGeneration === generation) return;
+  publicationInFlightGeneration = generation;
+  state.set({publicationsLoading: true});
+  try {
+    const result = await api.getPublications(taskId);
+    if (generation !== publicationGeneration || state.snapshot.selectedTaskId !== taskId) return;
+    state.set({
+      publications: Array.isArray(result.publications) ? result.publications : [],
+      publicationsLoading: false,
+      publicationsError: null,
+    });
+  } catch (error) {
+    if (generation !== publicationGeneration) return;
+    state.set({publicationsLoading: false, publicationsError: safeMessage(error, '發布紀錄暫時無法同步。')});
+  } finally {
+    if (publicationInFlightGeneration === generation) publicationInFlightGeneration = null;
   }
 }
 
@@ -614,6 +939,8 @@ elements['submit-revision'].addEventListener('click', () => submitRevision());
 elements['cancel-revision'].addEventListener('click', cancelRevision);
 elements['resubmit-review'].addEventListener('click', resubmitReview);
 elements['cancel-review'].addEventListener('click', cancelReview);
+elements['publish-task'].addEventListener('click', () => publishSelectedTask());
+elements['resubmit-publish'].addEventListener('click', () => publishSelectedTask({reuse: true}));
 tabs.forEach((tab, index) => {
   tab.addEventListener('click', () => setPanel(panelFor(tab)));
   tab.addEventListener('keydown', (event) => {
@@ -634,6 +961,7 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
     loadTasks();
     loadEvents();
+    loadPublications();
     loadStatus();
   }
 });
@@ -645,5 +973,6 @@ setInterval(() => {
   if (document.visibilityState !== 'visible') return;
   loadTasks();
   loadEvents();
+  loadPublications();
   loadStatus();
 }, POLL_INTERVAL_MS);

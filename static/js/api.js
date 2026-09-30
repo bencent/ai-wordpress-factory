@@ -113,6 +113,22 @@ export function createApiClient({fetchImpl = globalThis.fetch?.bind(globalThis),
         feedback: requireId(feedback, 'feedback'),
       }),
     }),
+    // Publication. The three routes deliberately return three DIFFERENT shapes, so each
+    // helper documents its own and callers must not assume they agree:
+    //   publishTask          -> the publication view itself
+    //   getPublications      -> {publications: [...]}, server order, never reordered
+    //   requestReconciliation-> {publication: {...}}
+    publishTask: (taskId, contentVersionId, idempotencyKey) => request(`/api/v1/tasks/${encodeURIComponent(requireId(taskId, 'task_id'))}/publish`, {
+      method: 'POST',
+      headers: {'Idempotency-Key': requireId(idempotencyKey, 'idempotency_key')},
+      body: JSON.stringify({content_version_id: requireId(contentVersionId, 'content_version_id')}),
+    }),
+    getPublications: (taskId) => request(`/api/v1/tasks/${encodeURIComponent(requireId(taskId, 'task_id'))}/publications`),
+    // Idempotent by durable state, not by key, so this route takes no Idempotency-Key.
+    requestReconciliation: (taskId, publicationId) => request(`/api/v1/tasks/${encodeURIComponent(requireId(taskId, 'task_id'))}/publications/${encodeURIComponent(requireId(publicationId, 'publication_id'))}/reconcile`, {
+      method: 'POST',
+      body: '{}',
+    }),
     getStatus: () => request('/api/v1/system/status'),
   });
 }
