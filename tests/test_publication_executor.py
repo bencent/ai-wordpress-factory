@@ -1254,16 +1254,18 @@ class TestExecutionTimingPolicy:
 def test_executor_still_does_not_require_0013():
     """3C5C forbade a 0013 because publishing execution needs no new migration.
 
-    3C6B then created 0013 for historical publishing-target configuration, which
-    is durable evidence for a FUTURE reconciler. That migration is not consumed by
-    the executor: it adds no column to task_publication_requests, no reconciliation
-    lease, and no attempt counter, so the create path is unchanged by it. The
-    original guard is therefore narrowed rather than deleted -- the executor must
-    still not depend on reconciliation machinery.
+    3C6B and 3C6C then created 0013 (historical target configuration) and 0014
+    (durable reconciliation ownership). Neither is consumed by the executor: 0013
+    adds no column to task_publication_requests, and 0014 adds no reconciliation
+    lease, no attempt counter and no due flag that the create path reads, so the
+    create path is unchanged. The original guard is therefore narrowed rather than
+    deleted -- the executor must still not depend on reconciliation machinery.
     """
     migrations = sorted((ROOT / "persistence" / "migrations").glob("*.sql"))
-    assert migrations[-1].name == "0013_publishing_target_history.sql"
-    assert (ROOT / "persistence/migrations/0012_publication_execution_safety.sql").exists()
+    assert [m.name for m in migrations][-3:] == [
+        "0012_publication_execution_safety.sql",
+        "0013_publishing_target_history.sql",
+        "0014_publication_reconciliation.sql"]
     source = code_of("service/publication_executor.py")
     # A log line may SAY "reconciliation required" -- that is correct operator
     # guidance. What must not appear is the executor CALLING reconciliation.

@@ -664,7 +664,7 @@ class TestIsolationFromSideEffects:
 
     def test_no_migration_added(self):
         versions = sorted(int(p.name[:4]) for p in (ROOT / 'persistence/migrations').glob('*.sql'))
-        assert versions == list(range(1, 14))
+        assert versions == list(range(1, 15))
 
     def test_publication_table_has_no_marker_column(self):
         """The marker is derived, so duplicating it in storage is not required."""

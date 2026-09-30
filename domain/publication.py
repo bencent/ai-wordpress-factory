@@ -66,6 +66,50 @@ SAFE_PUBLICATION_ERROR_CODES = frozenset({
 })
 
 
+# Reconciliation diagnostics are a SEPARATE vocabulary from
+# SAFE_PUBLICATION_ERROR_CODES, and the separation is the point.
+#
+# SAFE_PUBLICATION_ERROR_CODES explains why a publication reached its current
+# state (EXECUTOR_LOST, TIMEOUT, RATE_LIMIT, ...). It is written once at the
+# terminal transition, is never read back by any code, and complete_publication
+# NULLs it. It is the forensic record of the original uncertainty and must not be
+# overwritten: a publication whose execution died of RATE_LIMIT must still say so
+# after reconciliation also came back empty-handed.
+#
+# These six codes explain why a reconciliation ATTEMPT could not prove success.
+# They describe a scan, not a remote state, and none of them implies the resource
+# is absent.
+#
+# RECONCILIATION_NOT_FOUND is deliberately absent. A scan that observes zero exact
+# marker matches has NOT proven absence: the marker may have been stripped by a
+# sanitizer, the post may be in the trash, pagination may have been cut short, or
+# the credentials may have been narrowed. The only honest word for that outcome is
+# RECONCILIATION_ZERO_MATCH, which says exactly what happened -- this scan
+# observed zero matches -- and no more. The word "not found" would smuggle in a
+# conclusion the evidence does not support, and a future reader would act on it.
+SAFE_RECONCILIATION_ERROR_CODES = frozenset({
+    # This scan observed zero exact marker matches. NOT "the resource does not
+    # exist". The publication stays INDETERMINATE.
+    'RECONCILIATION_ZERO_MATCH',
+    # More than one distinct remote resource carried the exact marker. Choosing
+    # one would hide that the side effect may have happened more than once.
+    'RECONCILIATION_AMBIGUOUS',
+    # Exactly one match, but on a collection the publication did not target. The
+    # resource exists; it is not the resource this publication claims.
+    'RECONCILIATION_CONTENT_TYPE_MISMATCH',
+    # The lookup could not complete: DNS, connect, TLS, timeout, reset, 5xx, 429,
+    # or an incomplete pagination walk.
+    'RECONCILIATION_UNAVAILABLE',
+    # We were not permitted to look: 401, 403, or content.raw unavailable. A live
+    # post is fully consistent with a 403, so this proves nothing about presence.
+    'RECONCILIATION_AUTHORIZATION',
+    # The publication's historical target configuration no longer exists, so the
+    # exact destination it was sent to cannot be determined. The current target is
+    # never substituted: that would search a possibly different WordPress.
+    'RECONCILIATION_TARGET_UNAVAILABLE',
+})
+
+
 @dataclass(frozen=True)
 class PublicationLease:
     """Proof that one executor currently owns one publication execution.
@@ -90,6 +134,51 @@ class PublicationLease:
                 raise ValueError(f"{field} must be non-empty string without whitespace")
         if type(self.fencing_token) is not int or self.fencing_token < 0:
             raise ValueError("fencing_token must be a non-negative int")
+
+
+@dataclass(frozen=True)
+class ReconciliationLease:
+    """Proof that one worker owns the investigation of one INDETERMINATE publication.
+
+    Deliberately separate from :class:`PublicationLease`, and not a subclass. The
+    two mean different things and never overlap in time:
+
+    ``PublicationLease``
+        CREATE execution ownership. Moves PENDING -> IN_PROGRESS and accompanies
+        an attempt to send a remote create.
+
+    ``ReconciliationLease``
+        Ownership of a READ-ONLY investigation into a create that may already have
+        happened. The publication stays INDETERMINATE throughout; this lease
+        never authorises a move to IN_PROGRESS.
+
+    Reusing one type would have been smaller and wrong. Their predicates differ
+    (execution requires ``state='IN_PROGRESS'``, reconciliation requires
+    ``state='INDETERMINATE'``), their tokens are bumped by different mechanisms,
+    and conflating them would let a reconciliation write satisfy an execution
+    predicate. They live in separate columns for the same reason.
+
+    Like PublicationLease it is a frozen value carrying only the identity needed
+    to re-assert ownership. There is deliberately no ``secret``, no
+    ``WordPressConnection``, no ``PublishCommand``, no remote content and no
+    exception text: a lease is a capability token, and anything carried in it is
+    something a caller could log.
+    """
+
+    publication_id: str
+    workspace_id: str
+    owner_id: str
+    fencing_token: int
+
+    def __post_init__(self):
+        for field in ('publication_id', 'workspace_id', 'owner_id'):
+            value = getattr(self, field)
+            if not isinstance(value, str):
+                raise ValueError(f"{field} must be string")
+            if not value or value != value.strip():
+                raise ValueError(f"{field} must be non-empty string without whitespace")
+        if type(self.fencing_token) is not int or self.fencing_token < 1:
+            raise ValueError("fencing_token must be a positive int")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -192,6 +281,27 @@ class PublicationRequest:
     # publication is IN_PROGRESS and is never cleared, so expiry can distinguish
     # a crash that provably never attempted a create from one that may have.
     may_send_at: str | None = None
+    # -- Reconciliation ownership (8.3-3C6C) --------------------------------
+    # Separate from the execution lease above, and never a return to IN_PROGRESS.
+    # A publication under reconciliation is still INDETERMINATE; these columns are
+    # ownership metadata for a READ-ONLY investigation, not a second lifecycle.
+    #
+    # reconciliation_requested_at is a durable DUE flag set only by an explicit
+    # operator request and CONSUMED by the claim that acts on it. Without that
+    # consumption an attempt that proves nothing would return the row to exactly
+    # this state and be claimed again on the next sweep, forever.
+    reconciliation_requested_at: str | None = None
+    reconciliation_owner_id: str | None = None
+    # Monotonic generation counter; a new claim increments it so a previous
+    # attempt's lease can never match the current one.
+    reconciliation_fencing_token: int | None = None
+    reconciliation_claimed_at: str | None = None
+    reconciliation_heartbeat_at: str | None = None
+    # Why the most recent attempt could not prove success. Stored separately from
+    # error_code, which is preserved as the record of how execution became
+    # unknown; overwriting it would destroy that forensic evidence.
+    reconciliation_error_code: str | None = None
+    reconciliation_last_attempted_at: str | None = None
 
     def __post_init__(self):
         _validate_uuid(self.publication_id, "publication_id")
@@ -247,6 +357,53 @@ class PublicationRequest:
             if (type(self.target_configuration_version) is not int
                     or self.target_configuration_version < 1):
                 raise ValueError("target_configuration_version must be a positive int")
+        self._validate_reconciliation_ownership()
+
+    def _validate_reconciliation_ownership(self):
+        """Mirror the 0014 CHECK constraints in the domain layer.
+
+        The database is the authority; this exists so a malformed value fails at
+        the boundary with a named field rather than surfacing later as an opaque
+        constraint rejection. It cannot weaken the schema, which is still checked.
+        """
+        for field in ('reconciliation_requested_at', 'reconciliation_owner_id',
+                      'reconciliation_claimed_at', 'reconciliation_heartbeat_at',
+                      'reconciliation_last_attempted_at'):
+            value = getattr(self, field)
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                raise ValueError(f"{field} must be a non-empty string when present")
+        if self.reconciliation_fencing_token is not None:
+            if type(self.reconciliation_fencing_token) is not int \
+                    or self.reconciliation_fencing_token < 1:
+                raise ValueError("reconciliation_fencing_token must be a positive int when present")
+        if self.reconciliation_error_code is not None:
+            if self.reconciliation_error_code not in SAFE_RECONCILIATION_ERROR_CODES:
+                raise ValueError("reconciliation_error_code must be a safe reconciliation code")
+        # The claim fields move together: a claim sets all three, a completion
+        # clears all three. A partial set is a capability token matching no lease.
+        claim_fields = (self.reconciliation_owner_id is not None,
+                        self.reconciliation_claimed_at is not None,
+                        self.reconciliation_heartbeat_at is not None)
+        if len(set(claim_fields)) != 1:
+            raise ValueError("reconciliation claim fields must be complete or entirely absent")
+        # The fencing token is deliberately excluded from that group. It is a
+        # monotonic generation counter that must be able to outlive the claim that
+        # created it -- releasing a stale worker bumps the token and clears the
+        # owner, which would be impossible if the token had to vanish too. What is
+        # enforced is the direction that matters: ownership requires a generation.
+        if self.reconciliation_owner_id is not None \
+                and self.reconciliation_fencing_token is None:
+            raise ValueError("reconciliation ownership requires a fencing token")
+        # Only an unresolved publication has anything to reconcile.
+        if self.reconciliation_owner_id is not None \
+                and self.state is not PublicationState.INDETERMINATE:
+            raise ValueError("only an INDETERMINATE publication may hold reconciliation ownership")
+        if self.reconciliation_requested_at is not None \
+                and self.state is not PublicationState.INDETERMINATE:
+            raise ValueError("only an INDETERMINATE publication may have a due request")
+        if self.reconciliation_error_code is not None \
+                and self.state is not PublicationState.INDETERMINATE:
+            raise ValueError("only an INDETERMINATE publication may carry a reconciliation diagnostic")
 
 
 # -- Reconciliation identity -------------------------------------------------

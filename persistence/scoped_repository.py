@@ -122,6 +122,16 @@ class SQLiteWorkspaceRepository:
         return self._internal.get_publishing_target_version(
             self._workspace_id, target_id, configuration_version)
 
+    def get_publishing_target_version_evidence(self, target_id, configuration_version):
+        """Does an exact historical configuration record exist? ACTIVE-agnostic.
+
+        Separates evidence existence from permission to act on it, so an archived
+        workspace cannot make a missing destination look like a present one. Still
+        workspace-scoped; only the ACTIVE filter is absent.
+        """
+        return self._internal.get_publishing_target_version_evidence(
+            self._workspace_id, target_id, configuration_version)
+
     def publishing_target_versions(self, target_id):
         """Every historical configuration for one target, oldest first.
 
@@ -391,3 +401,54 @@ class SQLiteWorkspaceRepository:
     def expire_stale_publications(self, cutoff, now):
         """Fence out silent leases as INDETERMINATE. Never reclaims to PENDING."""
         return self._internal.expire_stale_publications(cutoff, now)
+
+    # -- Reconciliation (8.3-3C6C) -----------------------------------------
+    # Read-only with respect to WordPress. These move durable ownership and
+    # diagnostics only; no network call is made or scheduled here. The single
+    # state change available to a reconciler is INDETERMINATE -> SUCCEEDED, and
+    # only on a positive proof of presence.
+
+    def request_reconciliation(self, publication_id, now):
+        """Ask for one publication to be investigated. Returns None or a safe code.
+
+        Operator-triggered and one-attempt: the request is a durable due flag that
+        a claim consumes, so an attempt that proves nothing does not re-arm itself.
+        """
+        return self._internal.request_reconciliation(self._workspace_id, publication_id, now)
+
+    def claim_publication_for_reconciliation(self, owner_id, now):
+        """Take exclusive ownership of one requested investigation, or None.
+
+        The publication stays INDETERMINATE throughout; this is separate
+        ownership metadata, not a return to IN_PROGRESS.
+        """
+        return self._internal.claim_publication_for_reconciliation(
+            self._workspace_id, owner_id, now)
+
+    def assert_reconciliation_ownership(self, lease):
+        return self._internal.assert_reconciliation_ownership(lease)
+
+    def heartbeat_reconciliation(self, lease, now):
+        return self._internal.heartbeat_reconciliation(lease, now)
+
+    def complete_reconciliation_unresolved(self, lease, error_code, now):
+        """Finish an attempt that could not prove success. Stays INDETERMINATE.
+
+        There is deliberately no FAILED counterpart.
+        """
+        return self._internal.complete_reconciliation_unresolved(lease, error_code, now)
+
+    def resolve_reconciliation_succeeded(self, lease, remote_resource_id, remote_url, now):
+        """INDETERMINATE -> SUCCEEDED on positive proof of presence."""
+        return self._internal.resolve_reconciliation_succeeded(
+            lease, remote_resource_id, remote_url, now)
+
+    def expire_stale_reconciliation(self, cutoff, now):
+        """Release reconciliation ownership whose worker went silent.
+
+        The publication state is NOT changed: an expired attempt is not evidence
+        about the remote at all, so any transition would assert a conclusion
+        nobody observed. Ownership is released, the worker is fenced out, and the
+        request stays consumed, so a new attempt needs a new explicit request.
+        """
+        return self._internal.expire_stale_reconciliation(cutoff, now)

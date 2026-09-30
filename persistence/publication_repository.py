@@ -3,7 +3,9 @@ from uuid import uuid4
 
 from domain.contracts import ContentVersion, Status
 from domain.publication import (ApprovedVersion, PublicationLease, PublicationRequest,
-                                PublicationState, SAFE_PUBLICATION_ERROR_CODES)
+                                PublicationState, ReconciliationLease,
+                                SAFE_PUBLICATION_ERROR_CODES,
+                                SAFE_RECONCILIATION_ERROR_CODES)
 from domain.publishing_target import PublishingProviderType
 from persistence.codec import decode_snapshot
 from persistence.connection import PersistenceError
@@ -20,6 +22,26 @@ _CLAIM_PREDICATE = ("publication_id=? AND workspace_id=? AND owner_id=? "
 _CLAIM_ARGUMENTS = 'publication_id,workspace_id,owner_id,fencing_token'
 _CLAIM_WRITES = ('UPDATE task_publication_requests SET heartbeat_at=?,updated_at=? '
                  f'WHERE {_CLAIM_PREDICATE}')
+
+# The reconciliation ownership predicate is built by
+# _reconciliation_predicate() rather than being a module constant, because it has
+# to be table-qualified for the reads that join workspaces.
+#
+# It is deliberately NOT derived from _CLAIM_PREDICATE: the two leases govern
+# different activities and a shared predicate would let one satisfy the other.
+#
+# state='INDETERMINATE' is load-bearing rather than incidental. It is what stops
+# a reconciliation write from landing on a row that has since been resolved by
+# something else -- an operator, or another tool -- between the claim and the
+# result.
+
+# Safe rejections from request_reconciliation. They name a local precondition, not
+# a remote outcome, and none of them is ever persisted on the publication.
+RECONCILIATION_NOT_FOUND = 'RECONCILIATION_NOT_FOUND'
+RECONCILIATION_NOT_INDETERMINATE = 'RECONCILIATION_NOT_INDETERMINATE'
+RECONCILIATION_NO_MAY_SEND = 'RECONCILIATION_NO_MAY_SEND'
+RECONCILIATION_NO_TARGET_SNAPSHOT = 'RECONCILIATION_NO_TARGET_SNAPSHOT'
+RECONCILIATION_WORKSPACE_ARCHIVED = 'RECONCILIATION_WORKSPACE_ARCHIVED'
 
 
 class PublicationRepositoryMixin:
@@ -375,3 +397,289 @@ class PublicationRepositoryMixin:
         """Reject anything that is not a classified code, mirroring fail_run."""
         if error_code not in SAFE_PUBLICATION_ERROR_CODES:
             raise ValueError('Unsupported safe publication error code')
+
+    @staticmethod
+    def _check_reconciliation_error_code(error_code):
+        """Reject anything outside the reconciliation vocabulary.
+
+        Checked against its own frozenset, not SAFE_PUBLICATION_ERROR_CODES. A
+        reconciliation diagnostic is a different kind of fact, and letting the
+        two sets overlap would invite a future caller to persist 'TIMEOUT' as a
+        reconciliation outcome and 'RECONCILIATION_ZERO_MATCH' as a publication
+        failure. Neither is a thing this system can honestly assert.
+        """
+        if error_code not in SAFE_RECONCILIATION_ERROR_CODES:
+            raise ValueError('Unsupported safe reconciliation error code')
+
+    # -- Reconciliation ownership (8.3-3C6C) --------------------------------
+    #
+    # Read-only with respect to WordPress, and operator-triggered. Nothing below
+    # performs or schedules a network call: these methods only move durable
+    # ownership and diagnostics. The one state change in the whole set is
+    # INDETERMINATE -> SUCCEEDED, and only on a positive proof of presence.
+
+    def request_reconciliation(self, workspace_id, publication_id, now):
+        """Explicitly ask for one publication to be investigated.
+
+        Returns None when the request is accepted, or a safe code naming the
+        local precondition that rejected it. The four repeated-request cases are
+        defined, not incidental:
+
+        * **not pending, not claimed** -- a due request is created. This is the
+          only path that sets ``reconciliation_requested_at``.
+        * **already pending** -- idempotent success. The existing due flag is
+          kept, so its ordering position does not jump forward on a repeat.
+        * **currently claimed** -- accepted as a no-op. Ownership is never
+          stolen or extended. The publication is already being investigated, so
+          the operator's intent is satisfied in progress; a further request is
+          needed after the attempt finishes. Recording a due flag here would be
+          actively harmful: it would re-arm the row the moment the attempt
+          completed, which is the automatic retry loop this design exists to
+          avoid.
+        * **already SUCCEEDED / FAILED / IN_PROGRESS / PENDING** -- rejected with
+          RECONCILIATION_NOT_INDETERMINATE. There is nothing to reconcile.
+
+        Whether the historical target configuration still exists is deliberately
+        NOT checked here. Filtering it at request time would make such a
+        publication permanently un-requestable, and the reason it cannot be
+        investigated would never be recorded. Claiming it and finishing with
+        RECONCILIATION_TARGET_UNAVAILABLE makes the condition observable.
+        """
+        self._write()
+        if not self._active_workspace(workspace_id):
+            return RECONCILIATION_WORKSPACE_ARCHIVED
+        row = self._conn.execute(
+            "SELECT state,may_send_at,target_id,target_configuration_version,"
+            "reconciliation_requested_at,reconciliation_owner_id "
+            "FROM task_publication_requests WHERE publication_id=? AND workspace_id=?",
+            (publication_id, workspace_id)).fetchone()
+        if row is None:
+            return RECONCILIATION_NOT_FOUND
+        if row['state'] != 'INDETERMINATE':
+            return RECONCILIATION_NOT_INDETERMINATE
+        if row['may_send_at'] is None:
+            # No create was ever attempted, so there is nothing to find.
+            return RECONCILIATION_NO_MAY_SEND
+        if row['target_id'] is None or row['target_configuration_version'] is None:
+            return RECONCILIATION_NO_TARGET_SNAPSHOT
+        if row['reconciliation_owner_id'] is not None:
+            return None
+        if row['reconciliation_requested_at'] is not None:
+            return None
+        changed = self._conn.execute(
+            "UPDATE task_publication_requests SET reconciliation_requested_at=?,updated_at=? "
+            "WHERE publication_id=? AND workspace_id=? AND state='INDETERMINATE' "
+            "AND reconciliation_requested_at IS NULL AND reconciliation_owner_id IS NULL",
+            (now, now, publication_id, workspace_id)).rowcount
+        return None if changed == 1 else RECONCILIATION_NOT_INDETERMINATE
+
+    def claim_publication_for_reconciliation(self, workspace_id, owner_id, now):
+        """Take exclusive ownership of one explicitly requested investigation.
+
+        Returns a ReconciliationLease, or None when no requested work exists. The
+        caller receives data only, so no network call can happen inside this
+        transaction.
+
+        Four preconditions, all enforced by the database as well as here:
+
+        * state='INDETERMINATE' -- the only state with a recoverable question.
+        * ``reconciliation_requested_at IS NOT NULL`` -- operator-triggered. A
+          sweep that claimed every INDETERMINATE row would retry forever, because
+          an attempt that proves nothing returns the row to exactly this state.
+        * ``may_send_at IS NOT NULL`` -- a create may have been attempted. Without
+          it there is provably nothing to find, and searching for it would only
+          produce a fabricated zero-match.
+        * target snapshot present -- no destination, no search.
+
+        Workspace must be ACTIVE, so an archived workspace never starts network
+        work. The historical target configuration is NOT required to exist: see
+        request_reconciliation.
+
+        The claim **consumes** the request (``reconciliation_requested_at`` is
+        cleared in the same UPDATE). That single fact is what makes the
+        operator-triggered model honest -- an unresolved attempt leaves the row
+        INDETERMINATE but no longer due.
+        """
+        self._write()
+        row = self._conn.execute(
+            "SELECT p.publication_id,p.reconciliation_fencing_token FROM task_publication_requests p "
+            "JOIN workspaces w ON w.workspace_id=p.workspace_id "
+            "WHERE p.workspace_id=? AND p.state='INDETERMINATE' "
+            "AND p.reconciliation_requested_at IS NOT NULL "
+            "AND p.reconciliation_owner_id IS NULL "
+            "AND p.may_send_at IS NOT NULL "
+            "AND p.target_id IS NOT NULL AND p.target_configuration_version IS NOT NULL "
+            "AND w.status='ACTIVE' "
+            # Deterministic: the oldest request first, publication_id breaking ties.
+            "ORDER BY p.reconciliation_requested_at,p.publication_id LIMIT 1",
+            (workspace_id,)).fetchone()
+        if row is None:
+            return None
+        token = (row['reconciliation_fencing_token'] or 0) + 1
+        changed = self._conn.execute(
+            "UPDATE task_publication_requests SET "
+            "reconciliation_owner_id=?,reconciliation_fencing_token=?,"
+            "reconciliation_claimed_at=?,reconciliation_heartbeat_at=?,"
+            "reconciliation_requested_at=NULL,updated_at=? "
+            "WHERE publication_id=? AND workspace_id=? AND state='INDETERMINATE' "
+            "AND reconciliation_requested_at IS NOT NULL AND reconciliation_owner_id IS NULL "
+            "AND may_send_at IS NOT NULL",
+            (owner_id, token, now, now, now, row['publication_id'], workspace_id)).rowcount
+        if changed != 1:
+            # Another worker won the compare-and-swap inside the same window.
+            return None
+        return ReconciliationLease(publication_id=row['publication_id'],
+                                   workspace_id=workspace_id, owner_id=owner_id,
+                                   fencing_token=token)
+
+    def owned_reconciliation(self, lease):
+        """Read the row this reconciliation lease claims to own. Read-only."""
+        return self._conn.execute(
+            "SELECT p.* FROM task_publication_requests p "
+            "JOIN workspaces w ON w.workspace_id=p.workspace_id "
+            f"WHERE {self._reconciliation_predicate(lease, 'p')} "
+            "AND w.status='ACTIVE'",
+            (lease.publication_id, lease.workspace_id, lease.owner_id,
+             lease.fencing_token)).fetchone()
+
+    def assert_reconciliation_ownership(self, lease):
+        """True only while this exact lease still owns the investigation."""
+        return self.owned_reconciliation(lease) is not None
+
+    def heartbeat_reconciliation(self, lease, now):
+        """Refresh the reconciliation lease. False means ownership was lost.
+
+        Exists because the lookup this lease authorises is a multi-page scan
+        whose duration is not bounded: 3C5C established that the HTTP timeout is
+        per-phase, so N pages x 2 phases has no fixed ceiling. Without a heartbeat
+        a long scan would look abandoned, and without expiry a crashed worker
+        would hold the claim forever -- blocking every future operator request,
+        since a request may not steal ownership.
+        """
+        self._write()
+        if self.owned_reconciliation(lease) is None:
+            return False
+        return self._conn.execute(
+            "UPDATE task_publication_requests SET reconciliation_heartbeat_at=?,updated_at=? "
+            f"WHERE {self._reconciliation_predicate(lease)}",
+            (now, now, lease.publication_id, lease.workspace_id, lease.owner_id,
+             lease.fencing_token)).rowcount == 1
+
+    def complete_reconciliation_unresolved(self, lease, error_code, now):
+        """Finish an attempt that could NOT prove success.
+
+        The publication stays INDETERMINATE. That is not a fallback: it is the
+        only honest outcome, because nothing in this architecture can prove a
+        remote resource is absent. A zero-match scan, an ambiguous result, a
+        cross-type hit, an unreachable site, a 403, and a missing historical
+        target all land here, and all of them leave the question open.
+
+        There is deliberately no resolve_reconciliation_failed(). Adding one
+        would put a single call between a future worker and a terminal FAILED
+        that no evidence in this system can support.
+
+        What this DOES change: ownership is released, a safe diagnostic is
+        recorded, and the request stays consumed. The row does not become
+        claimable again until an operator explicitly requests it again.
+        """
+        self._check_reconciliation_error_code(error_code)
+        self._write()
+        if self.owned_reconciliation(lease) is None:
+            return False
+        return self._conn.execute(
+            "UPDATE task_publication_requests SET "
+            "reconciliation_owner_id=NULL,reconciliation_claimed_at=NULL,"
+            "reconciliation_heartbeat_at=NULL,reconciliation_error_code=?,"
+            "reconciliation_last_attempted_at=?,updated_at=? "
+            f"WHERE {self._reconciliation_predicate(lease)}",
+            (error_code, now, now, lease.publication_id, lease.workspace_id,
+             lease.owner_id, lease.fencing_token)).rowcount == 1
+
+    def resolve_reconciliation_succeeded(self, lease, remote_resource_id, remote_url, now):
+        """Resolve INDETERMINATE -> SUCCEEDED on positive proof of presence.
+
+        The ONLY state change reconciliation can make. It requires the caller to
+        supply a positive remote id: that id is the evidence, and nothing here
+        infers one from a slug, a title, or a permalink. ``remote_url`` is
+        optional and is never required, because a lookup may legitimately not
+        return a link -- the id is what identifies the resource.
+
+        Ownership is cleared in the same statement. The 0014 CHECK forbids a
+        non-INDETERMINATE row from carrying reconciliation ownership, so a caller
+        that forgot to release it would have this UPDATE abort rather than leave
+        a SUCCEEDED row that a worker still believes it owns.
+
+        Deliberately NOT complete_publication(): that requires a PublicationLease
+        and state='IN_PROGRESS', and reusing it would mean pretending a
+        reconciliation is a second execution.
+        """
+        if type(remote_resource_id) is not int or remote_resource_id <= 0:
+            raise ValueError('remote_resource_id must be a positive int')
+        if remote_url is not None and (type(remote_url) is not str or not remote_url.strip()):
+            raise ValueError('remote_url must be a non-empty string when present')
+        self._write()
+        if self.owned_reconciliation(lease) is None:
+            return False
+        return self._conn.execute(
+            "UPDATE task_publication_requests SET state='SUCCEEDED',"
+            "remote_resource_id=?,remote_url=?,error_code=NULL,"
+            "reconciliation_owner_id=NULL,reconciliation_claimed_at=NULL,"
+            "reconciliation_heartbeat_at=NULL,reconciliation_error_code=NULL,"
+            "reconciliation_last_attempted_at=?,updated_at=? "
+            f"WHERE {self._reconciliation_predicate(lease)}",
+            (remote_resource_id, remote_url, now, now, lease.publication_id,
+             lease.workspace_id, lease.owner_id, lease.fencing_token)).rowcount == 1
+
+    def expire_stale_reconciliation(self, cutoff, now):
+        """Release reconciliation ownership whose worker went silent.
+
+        The state is NOT changed. An expired attempt is not evidence about the
+        remote at all -- the worker may have died before it read anything -- so
+        moving the row to FAILED would assert a conclusion nobody observed, and
+        moving it to SUCCEEDED would invent one.
+
+        What happens instead: ownership is released, the fencing token is
+        incremented so the crashed worker is permanently fenced out, a safe
+        EXECUTOR_LOST-style diagnostic is recorded, and the request stays
+        consumed. The row remains INDETERMINATE and is NOT requeued; a new
+        attempt requires a new explicit operator request.
+
+        Deliberately does not touch may_send_at, state, or the execution
+        ownership columns.
+        """
+        self._write()
+        rows = self._conn.execute(
+            "SELECT publication_id,reconciliation_owner_id,reconciliation_fencing_token "
+            "FROM task_publication_requests "
+            "WHERE state='INDETERMINATE' AND reconciliation_owner_id IS NOT NULL "
+            "AND COALESCE(reconciliation_heartbeat_at,reconciliation_claimed_at) <= ?",
+            (cutoff,)).fetchall()
+        expired = 0
+        for row in rows:
+            changed = self._conn.execute(
+                "UPDATE task_publication_requests SET reconciliation_owner_id=NULL,"
+                "reconciliation_claimed_at=NULL,reconciliation_heartbeat_at=NULL,"
+                "reconciliation_fencing_token=reconciliation_fencing_token+1,"
+                "reconciliation_error_code='RECONCILIATION_UNAVAILABLE',"
+                "reconciliation_last_attempted_at=?,updated_at=? "
+                "WHERE publication_id=? AND state='INDETERMINATE' "
+                "AND reconciliation_owner_id=? AND reconciliation_fencing_token=?",
+                (now, now, row['publication_id'], row['reconciliation_owner_id'],
+                 row['reconciliation_fencing_token'])).rowcount
+            expired += changed
+        return expired
+
+    @staticmethod
+    def _reconciliation_predicate(lease, alias=''):
+        """The full ownership predicate, optionally table-qualified.
+
+        The alias exists because ``owned_reconciliation`` joins ``workspaces``,
+        where a bare ``workspace_id`` is ambiguous between the two tables -- and
+        an ambiguous column is an OperationalError, not a safe default, so the
+        qualification must be explicit rather than left to SQLite.
+        """
+        prefix = f"{alias}." if alias else ""
+        return (f"{prefix}publication_id=? AND {prefix}workspace_id=? "
+                f"AND {prefix}reconciliation_owner_id=? "
+                f"AND {prefix}reconciliation_fencing_token=? "
+                f"AND {prefix}state='INDETERMINATE'")

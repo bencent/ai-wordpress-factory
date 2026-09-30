@@ -58,6 +58,9 @@ EXPECTED_PUBLICATION_TRIGGERS = {
     # Added by 0013: a new publication may only reference a target configuration
     # that has an immutable historical record.
     "task_publication_requests_target_version_recorded",
+    # Added by 0014 for the separate reconciliation ownership regime.
+    "task_publication_requests_reconciliation_fencing_monotonic",
+    "task_publication_requests_reconciliation_claimable",
 }
 EXPECTED_PUBLICATION_INDEXES = {"task_publication_requests_task",
                                 "task_publication_requests_claim"}
@@ -204,7 +207,7 @@ class TestMigration0012:
     def test_migration_0012_applies(self, store):
         versions = [r[0] for r in db_read(
             store, "SELECT version FROM schema_migrations ORDER BY version")]
-        assert versions == list(range(1, 14))
+        assert versions == list(range(1, 15))
 
     def test_table_remains_strict(self, store):
         for table in ("task_publication_requests", "publishing_targets"):

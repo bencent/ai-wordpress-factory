@@ -175,7 +175,7 @@ def test_wal_fk_timeout_and_idempotent_migration(store):
         assert conn.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'
         assert conn.execute('PRAGMA busy_timeout').fetchone()[0] == 50
         assert [r[0] for r in conn.execute(
-            'SELECT version FROM schema_migrations ORDER BY version')] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+            'SELECT version FROM schema_migrations ORDER BY version')] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
         assert {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")} == {
             'schema_migrations', 'tasks', 'task_runs', 'task_events', 'content_versions',
             'workspaces', 'ai_provider_connections', 'ai_invocations', 'task_retry_requests',
@@ -412,7 +412,7 @@ def test_concurrent_migrations_share_one_history(store):
             future.result(timeout=5)
     with store.factory.connection() as conn:
         assert [r[0] for r in conn.execute(
-            'SELECT version FROM schema_migrations ORDER BY version')] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+            'SELECT version FROM schema_migrations ORDER BY version')] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
 
 
 def test_migration_0004_schema_migrations_version_list(tmp_path):

@@ -377,7 +377,13 @@ class TestRequestPublication:
             'publication_id', 'workspace_id', 'task_id', 'content_version_id', 'approved_run_id',
             'content_type', 'idempotency_key', 'state', 'remote_resource_id', 'remote_url',
             'error_code', 'created_at', 'updated_at', 'owner_id', 'fencing_token', 'claimed_at',
-            'heartbeat_at', 'target_id', 'target_configuration_version', 'may_send_at'}
+            'heartbeat_at', 'target_id', 'target_configuration_version', 'may_send_at',
+            # 0014 adds a SEPARATE reconciliation regime. None of these duplicates
+            # article content, and none is secret material.
+            'reconciliation_requested_at', 'reconciliation_owner_id',
+            'reconciliation_fencing_token', 'reconciliation_claimed_at',
+            'reconciliation_heartbeat_at', 'reconciliation_error_code',
+            'reconciliation_last_attempted_at'}
 
     def test_no_secret_or_credential_material_is_persisted(self, store, workspace):
         """The publication row records target IDENTITY only, never a credential.

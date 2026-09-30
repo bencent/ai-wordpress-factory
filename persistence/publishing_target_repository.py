@@ -100,6 +100,8 @@ class PublishingTargetRepositoryMixin:
         )
 
     def _decode_target_version(self, row):
+        if row is None:
+            return None
         data = dict(row)
         return PublishingTargetVersion(
             target_id=data['target_id'],
@@ -177,13 +179,46 @@ class PublishingTargetRepositoryMixin:
             created_at=data['created_at'],
         )
 
-    def publishing_target_versions(self, workspace_id, target_id):
-        """Every historical configuration for one target, oldest version first.
+    def get_publishing_target_version_evidence(self, workspace_id, target_id,
+                                               configuration_version):
+        """Does an exact historical configuration record EXIST? ACTIVE-agnostic.
 
-        Present so a caller can see that a version is MISSING rather than
-        concluding it was never configured. Reconciliation itself must use the
-        exact lookup above; a list is diagnostic, not a resolver.
+        The narrow evidence read, added by 8.3-3C6C for one reason.
+
+        ``get_publishing_target_version`` joins ``workspaces`` for ACTIVE status,
+        which is the right convention for reading a destination you are about to
+        USE. But it silently conflates two unrelated questions for a reconciler:
+
+            "does this historical configuration exist?"
+            "is this workspace currently allowed to do network work?"
+
+        With the ACTIVE join those collapse, and an archived workspace makes
+        missing evidence indistinguishable from an absent workspace. A
+        reconciler would then report RECONCILIATION_TARGET_UNAVAILABLE -- a claim
+        about the destination -- when the truth is that the workspace is closed.
+        That is a false statement about a remote site, produced by a local
+        policy, which is the exact confusion this method removes.
+
+        So existence and permission are separated: this answers existence only,
+        and the caller decides separately whether it may act on the answer.
+
+        Workspace scoping is NOT weakened. The ``workspace_id`` predicate is
+        still mandatory and still joins nothing that would let one tenant read
+        another's history; only the ACTIVE-status filter is absent, and that
+        filter was never a tenancy boundary. A target row is scoped to exactly one
+        workspace by its foreign key, so there is nothing else to cross.
         """
+        if type(target_id) is not str or not target_id.strip():
+            raise ValueError('target_id is required')
+        if type(configuration_version) is not int or configuration_version < 1:
+            raise ValueError('configuration_version must be a positive int')
+        row = self._conn.execute(
+            "SELECT * FROM publishing_target_versions "
+            "WHERE workspace_id=? AND target_id=? AND configuration_version=?",
+            (workspace_id, target_id, configuration_version)).fetchone()
+        return self._decode_target_version(row)
+
+    def publishing_target_versions(self, workspace_id, target_id):
         if type(target_id) is not str or not target_id.strip():
             raise ValueError('target_id is required')
         rows = self._conn.execute(

@@ -363,7 +363,7 @@ class TestPublishingTargetDomain:
 class TestSchema0011:
     def test_migration_0011_applies_cleanly(self, store):
         versions = [r[0] for r in db_read(store, "SELECT version FROM schema_migrations ORDER BY version")]
-        assert versions == list(range(1, 14))
+        assert versions == list(range(1, 15))
 
     def test_schema_remains_strict(self, store):
         for table in ("publishing_targets", "task_publication_requests"):

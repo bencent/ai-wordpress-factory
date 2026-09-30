@@ -326,7 +326,7 @@ class TestMigration0013:
     def test_migration_0013_applies(self, store):
         versions = [r[0] for r in db_read(
             store, "SELECT version FROM schema_migrations ORDER BY version")]
-        assert versions == list(range(1, 14))
+        assert versions == list(range(1, 15))
 
     def test_history_table_is_strict(self, store):
         sql = db_one(store, "SELECT sql FROM sqlite_master WHERE type='table' "
@@ -1067,15 +1067,47 @@ class TestExclusions:
         assert db_one(store, "SELECT count(*) FROM task_events")[0] == before
 
     def test_no_reconciliation_was_implemented(self):
-        for relative in MODULES_3C6B:
+        """3C6B added durable target EVIDENCE, not reconciliation.
+
+        These three modules are owned by 3C6B and must stay evidence-only. 3C6C
+        later added the reconciliation contract to the shared repository, so this
+        assertion deliberately scopes itself to the modules 3C6B actually wrote.
+        """
+        for relative in ("domain/publishing_target.py",
+                         "persistence/migrations/0013_publishing_target_history.sql",
+                         "persistence/publishing_target_repository.py"):
             source = code_of(relative) if relative.endswith(".py") else \
                 (ROOT / relative).read_text(encoding="utf-8")
             for forbidden in ("find_by_marker", "classify_reconciliation",
                               "ReconciliationLookupUnresolved", "ReconciliationWorker",
                               "resolve_publication_succeeded", "resolve_publication_failed",
                               "claim_publication_for_reconciliation",
+                              "reconciliation_requested_at", "reconciliation_owner_id",
                               "RECONCILIATION_"):
                 assert forbidden not in source, f"{relative} must not contain {forbidden}"
+
+    def test_no_reconciliation_worker_exists_anywhere(self):
+        """3C6C provides the contract; the worker is 3C6D and does not exist yet.
+
+        Scoped to the whole source tree, so this fails the moment a loop, a
+        scheduler, or a gateway call is introduced.
+        """
+        import_root = ROOT
+        forbidden = ("find_by_marker(", "classify_reconciliation(",
+                     "ReconciliationWorker", "while True", "schedule", "backoff",
+                     "sleep(")
+        offenders = []
+        for path in sorted((import_root / "service").glob("*.py")):
+            source = path.read_text(encoding="utf-8")
+            for symbol in forbidden:
+                if symbol in source:
+                    offenders.append(f"{path.name}:{symbol}")
+        for path in sorted((import_root / "worker").glob("*.py")):
+            source = path.read_text(encoding="utf-8")
+            for symbol in ("find_by_marker", "reconciliation", "Reconciliation"):
+                if symbol in source:
+                    offenders.append(f"{path.name}:{symbol}")
+        assert not offenders, f"reconciliation worker machinery appeared: {offenders}"
 
     def test_no_reconciliation_error_codes_were_added(self):
         from domain.publication import SAFE_PUBLICATION_ERROR_CODES
