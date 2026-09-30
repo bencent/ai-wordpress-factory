@@ -76,6 +76,31 @@ def _build_parser():
                      metavar='env:NAME',
                      help='Credential reference to store, e.g. env:AIWF_WP_APP_PASSWORD. '
                           'This is the pointer only; the secret is never passed here')
+
+    provider = commands.add_parser(
+        'provider',
+        help='Operate on the workspace\'s AI provider connections',
+    )
+    provider_commands = provider.add_subparsers(dest='provider_command', required=True)
+
+    update = provider_commands.add_parser(
+        'update',
+        help='Set the default TEXT model on an existing provider connection',
+        description=(
+            'Replaces default_model and increments configuration_version by one. '
+            'Every other field is carried over unchanged, including the credential '
+            'reference, which is preserved as configuration and never dereferenced. '
+            'This command makes no provider call, so it cannot confirm that a model '
+            'exists on the account; it records the operator\'s choice.'
+        ),
+    )
+    update.add_argument('--workspace-id', required=True,
+                        help='Workspace that must own the provider connection')
+    update.add_argument('--provider-connection-id', required=True,
+                        help='Provider connection to update')
+    update.add_argument('--default-model', required=True, metavar='MODEL',
+                        help='New default TEXT model, e.g. gpt-4.1. Validated by the '
+                             'AIProviderConnection contract, not against a provider')
     return parser
 
 
@@ -184,6 +209,81 @@ def _add_publishing_target(args) -> int:
     return 0
 
 
+def _update_provider(args) -> int:
+    """Set an existing provider connection's default TEXT model.
+
+    Scope, deliberately narrow: exactly three values move --
+    ``default_model``, ``configuration_version``, and ``updated_at``. Every other
+    field is carried over from the record that was just read, so this command
+    cannot re-point a workspace, re-type a provider, or touch a credential.
+
+    Three conventions are reused rather than reinvented:
+
+    * **The read is the scoped repository's.** ``get_provider_connection`` filters on
+      workspace AND on an ACTIVE workspace, so cross-workspace and archived-workspace
+      access fail here, in a read-only transaction, before anything can be written.
+      It is the only provider lookup authority used.
+    * **The write is the internal repository's existing method.**
+      ``update_provider_connection`` -> ``_replace_configuration`` already exists and
+      is the same authority the persistence tests use. No SQL, no second write path.
+    * **The version moves because the project says configuration changes are
+      versioned.** ``PublishingTarget.with_configuration`` increments
+      ``configuration_version`` unconditionally and never compares against the old
+      value, so this does the same -- including when the requested model is
+      unchanged. The caller cannot supply a version.
+
+    No credential is dereferenced. ``credential_reference`` is carried across as
+    configuration and is never printed, and no resolver is ever constructed, so this
+    command succeeds whether or not the referenced variable exists.
+    """
+    from dataclasses import replace
+    from datetime import datetime, timezone
+    from domain.providers import ContractError
+
+    store = _open_store()
+    workspace_id = args.workspace_id
+    connection_id = args.provider_connection_id
+
+    # Transaction 1: read-only. Cannot mutate, so a failure here leaves no trace.
+    with store.workspace_transaction(workspace_id) as scoped:
+        current = scoped.get_provider_connection(connection_id)
+    if current is None:
+        # One message for "no such provider in this workspace" and "workspace is not
+        # ACTIVE" is deliberate: both are the scoped read returning nothing, and
+        # separating them would need a private SQL read this command must not do.
+        print('Provider connection not found in that workspace, or the workspace is '
+              'not ACTIVE. Nothing was changed.', file=sys.stderr)
+        return 2
+
+    # Validated by AIProviderConnection.__post_init__ via replace(). A rejected model
+    # fails before any write transaction is opened.
+    try:
+        candidate = replace(
+            current,
+            default_model=args.default_model,
+            configuration_version=current.configuration_version + 1,
+            updated_at=datetime.now(timezone.utc).isoformat(),
+        )
+    except ContractError:
+        print('Model rejected by the provider contract. A model name must match the '
+              'AIProviderConnection grammar. Nothing was changed.', file=sys.stderr)
+        return 2
+
+    # Transaction 2: the existing repository update authority, nothing else.
+    with store.transaction() as internal:
+        internal.update_provider_connection(candidate)
+
+    print('Updated provider connection {id} in workspace {ws}.'.format(
+        id=candidate.provider_connection_id, ws=workspace_id))
+    print('default_model         : {old} -> {new}'.format(
+        old=current.default_model, new=candidate.default_model))
+    print('configuration_version : {old} -> {new}'.format(
+        old=current.configuration_version, new=candidate.configuration_version))
+    print('No credential was read, resolved, or printed, and no provider call was made. '
+          'Runs already queued keep the model they snapshotted.')
+    return 0
+
+
 def main(argv=None) -> int:
     args = _parse_args(argv)
     if args.command == 'publishing-target' and args.target_command == 'add':
@@ -194,6 +294,13 @@ def main(argv=None) -> int:
             # row value, and this frame is the outermost one.
             print('Publishing target provisioning failed ({type}). No target was '
                   'written.'.format(type=type(error).__name__), file=sys.stderr)
+            return 2
+    if args.command == 'provider' and args.provider_command == 'update':
+        try:
+            return _update_provider(args)
+        except Exception as error:
+            print('Provider update failed ({type}). The connection was not '
+                  'changed.'.format(type=type(error).__name__), file=sys.stderr)
             return 2
     return 2
 
