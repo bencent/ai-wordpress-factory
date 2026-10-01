@@ -127,6 +127,67 @@ def test_agent_failure_does_not_stop_next_task(store,tmp_path):
     worker.run_once()
     assert read(store,second)[0].status==Status.AWAITING_APPROVAL
 
+def _unique_preview(harness, task, mocks):
+    """Give each Worker run a distinct preview_id.
+
+    The shared frontend mock reuses one fixed preview_id, which is fine for
+    single-run tests but collides across two runs by design of the
+    conflicting-replay guard (production renders mint a fresh uuid per render).
+    """
+    from uuid import uuid4
+    helper = fixtures.TestImageFailureSemantics()
+    artifact = helper._preview_artifact(task.id)
+    mocks['renderer'].render.return_value = (
+        replace(artifact, preview_id=str(uuid4())), None, helper._evidence(task.id))
+
+def test_awaiting_approval_does_not_block_next_task(store,tmp_path):
+    """AWAITING_APPROVAL isolation: a task waiting for human review must not
+    block another queued task, and neither task may contaminate the other.
+
+    Load-bearing mechanism: the claim selector only matches QUEUED/QUEUED runs
+    and the single-flight guard only blocks CLAIMED/RUNNING. If AWAITING_APPROVAL
+    were ever treated as globally blocking (added to either predicate), the
+    second run_once() would claim nothing and the B assertions below would fail.
+    """
+    first=submit(store,'a')
+    second=submit(store,'b')
+    assert first.task_id!=second.task_id
+    assert first.created_at<=second.created_at
+    worker=Worker(store,adapter(store,tmp_path))
+    Harness.options={'before':_unique_preview}
+    assert worker.run_once() is True
+    # FIFO: the first-submitted task is processed first (same ordering the
+    # existing failure-isolation test already relies on).
+    a_task,a_run,a_version,a_events=read(store,first)
+    assert a_task.status==a_run.status==Status.AWAITING_APPROVAL
+    assert a_task.current_run_id==a_run.run_id and a_run.task_id==first.task_id
+    assert a_version is not None and a_version.version_number==1
+    assert a_version.task_id==first.task_id and a_version.run_id==a_run.run_id
+    b_task,b_run,b_version,_=read(store,second)
+    assert b_task.status==Status.QUEUED and b_run.status==Status.QUEUED
+    assert b_version is None
+    assert b_task.current_run_id==b_run.run_id and b_run.task_id==second.task_id
+    a_current,a_content_version=a_task.current_run_id,a_task.latest_content_version_id
+    # Without touching A (no approval/revision/publication), the next run must
+    # claim and complete B.
+    assert worker.run_once() is True
+    b_task,b_run,b_version,b_events=read(store,second)
+    assert b_task.status==b_run.status==Status.AWAITING_APPROVAL
+    assert b_version is not None and b_version.version_number==1
+    assert b_version.task_id==second.task_id and b_version.run_id==b_run.run_id
+    # A is unchanged by B's execution.
+    a_task2,a_run2,a_version2,_=read(store,first)
+    assert a_task2.status==Status.AWAITING_APPROVAL
+    assert a_task2.current_run_id==a_current
+    assert a_task2.latest_content_version_id==a_content_version
+    assert a_version2.content_version_id==a_content_version
+    # No cross-task contamination.
+    assert a_run.run_id!=b_run.run_id
+    assert a_version.content_version_id!=b_version.content_version_id
+    assert {e.task_id for e in a_events}=={first.task_id}
+    assert {e.task_id for e in b_events}=={second.task_id}
+    assert a_task.current_run_id!=b_task.current_run_id
+
 @pytest.mark.parametrize('artifact',[{}, {'artifact_id':'broken','status':'ready'},
     {'artifact_id':'failed','status':'failed'}, {'artifact_id':'pending','status':'pending'}])
 def test_bad_images_fail_closed(store,tmp_path,artifact):
