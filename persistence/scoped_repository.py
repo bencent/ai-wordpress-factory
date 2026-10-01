@@ -8,6 +8,7 @@ from domain.providers import Workspace, AIProviderConnection, Capability
 from domain.publishing_target import PublishingProviderType
 from domain.preview import StoredPreview
 from domain.publication import ApprovedVersion, PublicationRequest, PublicationState
+from .connection import PersistenceError
 from persistence.connection import PersistenceError
 
 
@@ -153,6 +154,33 @@ class SQLiteWorkspaceRepository:
         """Status-only transition; deliberately does not move the version."""
         return self._internal.update_publishing_target_status(
             self._workspace_id, target_id, status, updated_at)
+
+    def get_plan_artifact(self, source_run_id):
+        """The Plan recorded for ``source_run_id`` in this workspace, or None.
+
+        Workspace scoping is structural here: the workspace comes from the scoped
+        handle, so an artifact belonging to another workspace is simply not found.
+        """
+        return self._internal.get_plan_artifact(self._workspace_id, source_run_id)
+
+    def add_plan_artifact(self, *, task_id, source_run_id, payload, now):
+        """Record the Plan produced by ``source_run_id`` in this workspace."""
+        return self._internal.add_plan_artifact(
+            workspace_id=self._workspace_id, task_id=task_id,
+            source_run_id=source_run_id, payload=payload, now=now)
+
+    def record_plan_artifact_reuse(self, run_id, source_run_id, artifact_id, now):
+        """Durable evidence that the run identified by ``run_id`` reused a verified Plan.
+
+        The run row is resolved here, under this workspace's scope, because the event
+        writer needs run identity and status exactly as `task_runs` holds them.
+        """
+        row = self._internal._conn.execute(
+            'SELECT r.* FROM task_runs r JOIN tasks t ON t.task_id=r.task_id '
+            'WHERE r.run_id=? AND t.workspace_id=?', (run_id, self._workspace_id)).fetchone()
+        if row is None:
+            raise PersistenceError('run not found for plan reuse record')
+        return self._internal.record_plan_artifact_reuse(row, source_run_id, artifact_id, now)
 
     def get_provider_connection(self, provider_connection_id):
         row = self._internal._conn.execute(

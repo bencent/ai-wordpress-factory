@@ -12,6 +12,7 @@ from .worker_repository import WorkerRepositoryMixin
 from .execution_repository import ExecutionRepositoryMixin
 from .provider_repository import ProviderRepositoryMixin
 from .publication_repository import PublicationRepositoryMixin
+from .plan_artifact_repository import PlanArtifactRepositoryMixin
 from .publishing_target_repository import PublishingTargetRepositoryMixin
 from domain.execution import RunLease
 
@@ -82,6 +83,7 @@ class Store(Protocol):
 
 class SQLiteInternalRepository(ProviderRepositoryMixin, ExecutionRepositoryMixin,
                               PublicationRepositoryMixin, PublishingTargetRepositoryMixin,
+                              PlanArtifactRepositoryMixin,
                               WorkerRepositoryMixin):
     """Unscoped execution/configuration access. Not an application query interface."""
     def __init__(self, connection, *, writable=False):

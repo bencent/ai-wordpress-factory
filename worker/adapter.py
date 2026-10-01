@@ -14,6 +14,7 @@ from domain.preview import PreviewRecord, PreviewAsset, PreviewAssetKind, Previe
 from service.checkpoints import checkpoint, STAGES
 from worker.safe_logging import safe_factory_logs
 from domain.observer import ObserverError
+from domain.plan_artifact import PlanArtifact, PlanArtifactInvalid
 from service.execution import PersistingObserver, build_version, now
 from worker.claiming import LeaseService
 from worker.local_images import LocalImages
@@ -198,10 +199,57 @@ class FactoryAdapter:
             raise ValueError('BackgroundFactory is required')
         self.factory_class, self.image_downloader = factory_class, image_downloader
 
+    def _plan_sink(self, lease):
+        """Persist the Plan a run produced, in its own short transaction.
+
+        Called from the workflow immediately after the Planner returns. It deliberately
+        does NOT join the `complete_content_version` transaction: that transaction only
+        runs when the entire workflow succeeded, so an artifact written there would not
+        survive the Research/Image/Preview failures this slice exists to make recoverable.
+
+        A failure here propagates. The workflow re-raises, the run fails, and no run can
+        therefore report Planner completion without a durable Plan behind it.
+        """
+
+        def sink(legacy_task, plan):
+            payload = dict(plan)
+            with self.store.workspace_transaction(lease.workspace_id) as repo:
+                repo.add_plan_artifact(task_id=lease.task_id, source_run_id=lease.run_id,
+                                       payload=payload, now=now())
+
+        return sink
+
+    def _load_verified_plan(self, repo, lease, run):
+        """Load and verify the Plan named by this run's source. Fails closed.
+
+        Every failure raises. None of them falls back to the Planner: a Recovery-intent
+        run that cannot prove what it is reusing must not silently regenerate, because
+        that would make Recovery indistinguishable from Retry.
+        """
+        source_run_id = run.resumed_from_run_id
+        artifact = repo.get_plan_artifact(source_run_id)
+        if artifact is None:
+            raise PlanArtifactInvalid(
+                f'recovery run {run.run_id} names source {source_run_id} '
+                'but no Plan artifact exists for it')
+        if artifact.source_run_id != source_run_id:
+            raise PlanArtifactInvalid('Plan artifact source run mismatch')
+        if artifact.task_id != lease.task_id:
+            raise PlanArtifactInvalid('Plan artifact belongs to a different task')
+        if artifact.workspace_id != lease.workspace_id:
+            raise PlanArtifactInvalid('Plan artifact belongs to a different workspace')
+        # Recomputes the digest from the stored payload; raises on mismatch.
+        return artifact.verified(), artifact.artifact_id
+
+    def _record_plan_reuse(self, lease, source_run_id, artifact_id):
+        with self.store.workspace_transaction(lease.workspace_id) as repo:
+            repo.record_plan_artifact_reuse(lease.run_id, source_run_id, artifact_id, now())
+
     def __call__(self, lease, cancelled):
         service = LeaseService(self.store)
         service.assert_active(lease)
         revision_context = None
+        recovered_plan = None
         with self.store.workspace_reader(lease.workspace_id) as repo:
             task, run = repo.get_task(lease.task_id), repo.get_run(lease.task_id, lease.run_id)
             if task is None or run is None:
@@ -215,8 +263,18 @@ class FactoryAdapter:
             elif run.run_mode != RunMode.INITIAL:
                 # Unknown/unsupported run mode
                 raise ValueError(f'Unsupported run_mode: {run.run_mode}')
+            # Phase 8.4-1: an explicit Recovery-intent run names its source run through
+            # `resumed_from_run_id`. That name is the ONLY reuse authority. There is no
+            # search, no "latest reusable Plan", and no `completed_stages` check.
+            if run.resumed_from_run_id is not None:
+                recovered_plan, artifact_id = self._load_verified_plan(
+                    repo, lease, run)
+        if recovered_plan is not None:
+            self._record_plan_reuse(lease, run.resumed_from_run_id, artifact_id)
 
         legacy = map_task(task)
+        # Set explicitly, only after verification. Absence keeps the normal path.
+        legacy.recovered_plan = recovered_plan
         cfg = self.config_resolver(task.site_id)
         if not isinstance(cfg, Config):
             raise ValueError('Explicit runtime config is required')
@@ -234,6 +292,7 @@ class FactoryAdapter:
         options = {} if self.image_downloader is None else {'downloader': self.image_downloader}
         images = LocalImages(self.image_root, task.site_id, task.task_id, run.run_id, workspace_id=lease.workspace_id, **options)
         factory.images = images
+        factory.plan_sink = self._plan_sink(lease)
         observer = PersistingObserver(self.store, lease, cancelled, images)
         try:
             with safe_factory_logs():

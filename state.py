@@ -62,6 +62,12 @@ class Task:
     
     # 工作流程相關數據
     plan: Optional[Dict[str, Any]] = None
+    # A verified Plan recovered from a named source run (Phase 8.4-1). Set only by the
+    # worker adapter, and only after provenance and integrity verification. Kept
+    # separate from `plan` so "trust this field" is never implicit: its absence is the
+    # normal path, and its presence is an explicit, already-verified instruction.
+    # service.checkpoints selects named keys only, so it never reaches a checkpoint.
+    recovered_plan: Optional[Dict[str, Any]] = None
     research_data: Optional[List[Dict[str, Any]]] = None
     draft_content: Optional[str] = None
     critique_result: Optional[Dict[str, Any]] = None

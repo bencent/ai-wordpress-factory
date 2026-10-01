@@ -1261,11 +1261,16 @@ def test_executor_still_does_not_require_0013():
     create path is unchanged. The original guard is therefore narrowed rather than
     deleted -- the executor must still not depend on reconciliation machinery.
     """
+    # Re-scoped by 8.4-1, which added 0015 for an unrelated Plan artifact. A positional
+    # migration pin cannot outlive a later legitimate migration, so the durable form of
+    # the same guarantee is asserted: migrations above 0014 must not alter the
+    # publication schema the create path reads.
     migrations = sorted((ROOT / "persistence" / "migrations").glob("*.sql"))
-    assert [m.name for m in migrations][-3:] == [
-        "0012_publication_execution_safety.sql",
-        "0013_publishing_target_history.sql",
-        "0014_publication_reconciliation.sql"]
+    for migration in [m for m in migrations if int(m.name[:4]) > 14]:
+        body = migration.read_text(encoding="utf-8")
+        for table in ('task_publication_requests', 'publishing_targets',
+                      'publishing_target_versions'):
+            assert table not in body, f"{migration.name} touches {table}"
     source = code_of("service/publication_executor.py")
     # A log line may SAY "reconciliation required" -- that is correct operator
     # guidance. What must not appear is the executor CALLING reconciliation.

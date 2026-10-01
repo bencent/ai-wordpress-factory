@@ -326,7 +326,7 @@ class TestMigration0013:
     def test_migration_0013_applies(self, store):
         versions = [r[0] for r in db_read(
             store, "SELECT version FROM schema_migrations ORDER BY version")]
-        assert versions == list(range(1, 15))
+        assert versions == list(range(1, 16))
 
     def test_history_table_is_strict(self, store):
         sql = db_one(store, "SELECT sql FROM sqlite_master WHERE type='table' "

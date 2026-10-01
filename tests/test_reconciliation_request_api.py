@@ -1066,9 +1066,20 @@ class TestNothingElseChanged:
         assert "def complete_reconciliation_unresolved" in source
 
     def test_no_migration_added(self):
+        """Re-scoped by 8.4-1; see the identical guard in test_publication_read_api.py.
+
+        A per-slice migration pin cannot outlive a later legitimate migration. The
+        durable guarantee is that no migration above 0014 alters the publication schema
+        this slice pinned.
+        """
         migrations = sorted((ROOT / "persistence/migrations").glob("*.sql"))
-        assert migrations[-1].name == "0014_publication_reconciliation.sql"
-        assert int(migrations[-1].name[:4]) == 14
+        later = [m for m in migrations if int(m.name[:4]) > 14]
+        assert later, "expected the 8.4-1 Plan artifact migration to exist"
+        for migration in later:
+            body = migration.read_text(encoding="utf-8")
+            for table in ('task_publication_requests', 'publishing_targets',
+                          'publishing_target_versions'):
+                assert table not in body, f"{migration.name} touches {table}"
 
     def test_no_idempotency_table_or_key_persistence(self, store):
         """No RECONCILIATION idempotency storage was added.

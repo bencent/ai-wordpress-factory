@@ -665,8 +665,11 @@ class TestCheckStateProjection:
         assert 'check_state' not in columns
         row = publication_row(store, publication_id)
         assert 'check_state' not in row
-        migrations = sorted((ROOT / "persistence/migrations").glob("*.sql"))
-        assert migrations[-1].name == "0014_publication_reconciliation.sql"
+        # No migration may introduce a persisted check_state column, in this or any
+        # later migration: it is a view projection, never stored state.
+        for migration in sorted((ROOT / "persistence/migrations").glob("*.sql")):
+            body = migration.read_text(encoding="utf-8")
+            assert "check_state" not in body.lower(), migration.name
 
 
 # -- 21-24: error-code safety ----------------------------------------------
@@ -1014,9 +1017,21 @@ class TestLayering:
             assert f"def {shortcut}" not in source
 
     def test_no_migration_added(self):
+        """Re-scoped by 8.4-1, which added an unrelated Plan-artifact migration.
+
+        The original assertion -- the newest migration is still 0014 -- proved *this*
+        slice never touched the schema. A per-slice migration pin cannot survive a later
+        legitimate migration, so the durable form of the same guarantee is asserted
+        instead: no migration above 0014 may touch a publication table.
+        """
         migrations = sorted((ROOT / "persistence/migrations").glob("*.sql"))
-        assert migrations[-1].name == "0014_publication_reconciliation.sql"
-        assert int(migrations[-1].name[:4]) == 14
+        later = [m for m in migrations if int(m.name[:4]) > 14]
+        assert later, "expected the 8.4-1 Plan artifact migration to exist"
+        for migration in later:
+            body = migration.read_text(encoding="utf-8")
+            for table in ('task_publication_requests', 'publishing_targets',
+                          'publishing_target_versions'):
+                assert table not in body, f"{migration.name} touches {table}"
 
 
 # -- 23-24 revisited at the HTTP boundary ----------------------------------

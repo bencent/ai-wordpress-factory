@@ -241,12 +241,32 @@ class AIWordPressFactory:
         try:
             # Step 1: 規劃階段
             self.state.update_task_status(task_id, TaskStatus.PLANNING)
-            planner = self._get_agent("planner")
-            if planner:
-                with self._agent_step(task, "planner"):
-                    plan = planner.create_plan(task)
-                    task.plan = plan
-                logger.info(f"任務 {task_id} 規劃完成")
+            recovered = getattr(task, 'recovered_plan', None)
+            if recovered is not None:
+                # Phase 8.4-1: an explicit Recovery run reuses a Plan that the worker
+                # adapter already loaded and verified (provenance + integrity) from the
+                # source run named by `resumed_from_run_id`. The Planner is not called and
+                # must not be called: regenerating here would make Recovery identical to
+                # Retry. The durable reuse evidence is written by the adapter, which owns
+                # the store; this layer stays database-free.
+                task.plan = recovered
+                logger.info("任務 %s 沿用已驗證的 Plan 成品，略過規劃階段", task_id)
+            else:
+                planner = self._get_agent("planner")
+                if planner:
+                    with self._agent_step(task, "planner"):
+                        plan = planner.create_plan(task)
+                        task.plan = plan
+                        # Persist the Plan immediately, in its own short transaction, so it
+                        # survives a failure in any later stage. This is NOT best-effort: if
+                        # the sink raises, `_agent_step` re-raises and the run fails, so a
+                        # run can never report Planner completion without a durable Plan.
+                        # Deferred to `complete_content_version` it would be useless, since
+                        # that transaction only runs when the whole workflow succeeded.
+                        sink = getattr(self, 'plan_sink', None)
+                        if sink is not None:
+                            sink(task, plan)
+                    logger.info(f"任務 {task_id} 規劃完成")
             
             # Step 2: 調研階段
             self.state.update_task_status(task_id, TaskStatus.RESEARCHING)
