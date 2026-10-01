@@ -9,7 +9,7 @@ from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException
 from fastapi.concurrency import run_in_threadpool
 from domain.submission import ValidationError,IdempotencyConflict,ProfileError,TaskNotFound,PreviewNotFound,PreviewAssetUnavailable,ApprovalConflict
-from service.task_http import (RetryConflict,RetryIdempotencyConflict,RevisionConflict,RevisionIdempotencyConflict,PublishConflict,PublishIdempotencyConflict,PublishTargetUnavailable,PublicationAlreadyExists,PublicationNotFound,ReconciliationConflict)
+from service.task_http import (RetryConflict,RetryIdempotencyConflict,RevisionConflict,RevisionIdempotencyConflict,PublishConflict,PublishIdempotencyConflict,PublishTargetUnavailable,PublicationAlreadyExists,PublicationNotFound,ReconciliationConflict,RecoveryConflict,RecoveryIdempotencyConflict)
 from persistence.connection import PersistenceError
 from service.http_bootstrap import build_http_service
 
@@ -88,6 +88,18 @@ def create_app(service=None):
         RevisionIdempotencyConflict:(409,'IDEMPOTENCY_CONFLICT','Revision key conflicts with an existing request.'),
         RevisionConflict:(409,'REVISION_CONFLICT','Task cannot be revised in its current state.'),
         ApprovalConflict:(409,'APPROVAL_CONFLICT','Approval cannot be completed.'),
+        # Recovery is not Retry (AGENTS.md section 9), so it keeps its own conflict code
+        # rather than reusing RETRY_CONFLICT. Deliberately generic for the same reason as
+        # reconciliation: the repository distinguishes several eligibility failures, and
+        # none of that detail belongs in an HTTP body.
+        RecoveryConflict:(409,'RECOVERY_CONFLICT','Task cannot be recovered in its current state.'),
+        RecoveryIdempotencyConflict:(409,'IDEMPOTENCY_CONFLICT','Recovery key conflicts with an existing request.'),
+        # PlanArtifactInvalid is deliberately NOT mapped here. It is raised when durable
+        # persisted state fails integrity verification, which is a server-side invariant
+        # failure and not a caller-correctable conflict. Left unmapped it reaches the
+        # existing `Exception` handler: 500 INTERNAL_ERROR with a generic body and a log
+        # line. Mapping it would have produced the same status but silently dropped that
+        # logging, and no artifact payload or checksum detail reaches the client either way.
         PublishIdempotencyConflict:(409,'IDEMPOTENCY_CONFLICT','Publication key conflicts with an existing request.'),
         PublishConflict:(409,'PUBLISH_CONFLICT','Task cannot be published in its current state.'),
         # A configuration problem in the workspace, not a problem with the task.
@@ -190,6 +202,24 @@ def create_app(service=None):
         if len(value) != 1:
             raise ValidationError('body')
         return await run_in_threadpool(application.approve,task_id,value['content_version_id'],keys[0])
+    @app.post('/api/v1/tasks/{task_id}/recover')
+    async def recover(request:Request,task_id:str):
+        # Recovery reuses a verified historical Plan artifact and creates NEW execution
+        # history. Eligibility, provenance and idempotency all belong to the service.
+        # This layer deliberately performs no pre-validation of mutable Recovery state --
+        # no FAILED check, no current-run check, no artifact check, no provider check --
+        # because TaskHTTPService.request_recovery consults the durable idempotency record
+        # FIRST. A pre-check here would defeat replay for a client that retries after
+        # losing a successful response, and would duplicate semantics owned below.
+        boundary(request)
+        keys=request.headers.getlist('idempotency-key')
+        if len(keys)!=1: raise ValidationError('idempotency_key')
+        value=await body(request)
+        if type(value) is not dict or 'source_run_id' not in value:
+            raise ValidationError('source_run_id')
+        if len(value) != 1:
+            raise ValidationError('body')
+        return await run_in_threadpool(application.request_recovery,task_id,value['source_run_id'],keys[0])
 
     @app.post('/api/v1/tasks/{task_id}/publish')
     async def publish(request:Request,task_id:str):
