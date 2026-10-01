@@ -1,27 +1,33 @@
 # AI WordPress Factory 依賴包
+#
+# Pinned exact versions for reproducible deployment (Phase 8.6-1).
+# Pins match the verified working development environment; fastapi/uvicorn
+# were already pinned as approved runtime versions. Do not loosen to >=
+# without re-validating the full suite.
 
 # AI 和語言模型
-openai>=1.0.0
-langchain>=0.1.0
+openai==3.19.2
+langchain==1.4.2
 
 # HTTP 客戶端
-requests>=2.31.0
-httpx>=0.25.0
+requests==2.34.2
+httpx==0.28.1
 
 # WordPress REST API
 
 # 數據處理
-pydantic>=2.0.0
-python-dotenv>=1.0.0
+pydantic==2.13.5
+python-dotenv==1.2.3
 
 # 搜索 API
-google-api-python-client>=2.100.0
+google-api-python-client==2.200.0
 
 # 工具和實用程序
-python-dateutil>=2.8.0
+python-dateutil==2.9.0.post0
 
 # Browser automation for preview rendering (Phase 7D-1)
-playwright>=1.40.0
+# Must match the Playwright base-image tag in Dockerfile.
+playwright==1.63.0
 
 # Phase 8.1 HTTP API (approved runtime versions)
 fastapi==0.137.1

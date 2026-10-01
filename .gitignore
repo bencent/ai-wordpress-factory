@@ -14,6 +14,11 @@ test_approval_state*.json
 # Local configuration and credentials
 config.json
 
+# Phase 8.6-1 deployment secrets and live identity (never committed).
+# Templates (.env.example, deployment/profiles.example.json) stay tracked.
+.env
+/deployment/profiles.json
+
 # Ad hoc debugging and temporary validation files
 debug_*.py
 test.js

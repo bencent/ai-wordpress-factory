@@ -1,0 +1,55 @@
+# Keep secrets, local state and tooling out of the image.
+# Production source (api/, worker/, service/, persistence/, domain/, tools/,
+# agents/, contracts/, providers/, publishing/, static/, migrations/,
+# requirements.txt, config.py, main.py) stays IN.
+
+.git/
+.gitignore
+# Live environment files only; the committed template stays in context.
+.env
+!.env.example
+
+# Local databases (the container uses the aiwf-data volume instead).
+/data/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.db
+
+# Local artifacts (the container uses the aiwf-artifacts volume instead).
+artifacts/
+
+# Live deployment identity lives on the host, mounted read-only.
+# The committed example (profiles.example.json) is NOT excluded.
+deployment/profiles.json
+
+# Local config that may hold secrets or machine-specific values.
+config.json
+workflow_state.json
+
+# Python tooling and caches.
+.venv/
+.venv-*/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+
+# Test and debug output.
+test_*.json
+debug_*.py
+test.js
+test_bad.js
+wordpress-mcp.log
+htmlcov/
+.coverage
+
+# Editors / OS.
+.idea/
+.vscode/
+.DS_Store

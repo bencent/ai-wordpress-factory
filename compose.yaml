@@ -1,0 +1,117 @@
+# Phase 8.6-1 single-host deployment. SQLite + local artifacts, no network
+# services beyond the app itself.
+#
+# Start: copy .env.example to .env, copy deployment/profiles.example.json to
+# deployment/profiles.json and edit it, then `docker compose up -d`.
+# See deployment/README.md.
+
+name: ai-wordpress-factory
+
+services:
+  migrate:
+    build: .
+    image: aiwf-app:8.6
+    command:
+      - python
+      - -c
+      - "import os; from persistence.connection import ConnectionFactory; from persistence.migration_runner import migrate; migrate(ConnectionFactory(os.environ.get('AIWF_DATABASE', '/app/data/aiwf.sqlite3')))"
+    env_file:
+      - .env
+    environment:
+      AIWF_DATABASE: /app/data/aiwf.sqlite3
+    volumes:
+      - aiwf-data:/app/data
+    restart: "no"
+
+  api:
+    build: .
+    image: aiwf-app:8.6
+    command:
+      - python
+      - -m
+      - uvicorn
+      - api.app:get_app
+      - --factory
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      AIWF_DATABASE: /app/data/aiwf.sqlite3
+      AIWF_PROFILES_FILE: /app/config/profiles.json
+    ports:
+      # Loopback-only by default. The app binds 0.0.0.0 INSIDE the container;
+      # the host side never listens publicly. Remote access via SSH tunnel or
+      # a protected reverse proxy (deployment-environment concern).
+      - "127.0.0.1:${HOST_PORT:-8000}:8000"
+    volumes:
+      - aiwf-data:/app/data
+      - aiwf-artifacts:/app/artifacts
+      - ./deployment/profiles.json:/app/config/profiles.json:ro
+    healthcheck:
+      # No curl/wget in the image by design; stdlib urllib only.
+      test:
+        - CMD
+        - python
+        - -c
+        - "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v1/system/status', timeout=5).status == 200 else 1)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  worker:
+    build: .
+    image: aiwf-app:8.6
+    command:
+      - python
+      - -m
+      - worker
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      AIWF_DATABASE: /app/data/aiwf.sqlite3
+      AIWF_PROFILES_FILE: /app/config/profiles.json
+    volumes:
+      - aiwf-data:/app/data
+      - aiwf-artifacts:/app/artifacts
+      - ./deployment/profiles.json:/app/config/profiles.json:ro
+    stop_grace_period: 90s
+    restart: unless-stopped
+
+  publication-worker:
+    build: .
+    image: aiwf-app:8.6
+    command:
+      - python
+      - -m
+      - worker
+      - --publication
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      AIWF_DATABASE: /app/data/aiwf.sqlite3
+    volumes:
+      # Only the database: this runtime never reads profiles or artifacts.
+      - aiwf-data:/app/data
+    stop_grace_period: 90s
+    restart: unless-stopped
+
+volumes:
+  aiwf-data:
+    name: aiwf-data
+  aiwf-artifacts:
+    name: aiwf-artifacts
