@@ -7,6 +7,15 @@
 
 name: ai-wordpress-factory
 
+x-logging: &default-logging
+  # Bounded local logs: a single-user VPS must not fill its disk.
+  # ~30 MB retained per service (3 x 10 MB) is ample for this log volume;
+  # older segments rotate away automatically. No external log shipper in V1.
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   migrate:
     build: .
@@ -66,6 +75,7 @@ services:
       start_period: 60s
     stop_grace_period: 30s
     restart: unless-stopped
+    logging: *default-logging
 
   worker:
     build: .
@@ -88,6 +98,7 @@ services:
       - ./deployment/profiles.json:/app/config/profiles.json:ro
     stop_grace_period: 90s
     restart: unless-stopped
+    logging: *default-logging
 
   publication-worker:
     build: .
@@ -109,6 +120,7 @@ services:
       - aiwf-data:/app/data
     stop_grace_period: 90s
     restart: unless-stopped
+    logging: *default-logging
 
 volumes:
   aiwf-data:
