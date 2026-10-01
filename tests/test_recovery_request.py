@@ -638,3 +638,59 @@ def test_idempotency_conflict_does_not_invoke_resolver(env):
     with pytest.raises(RecoveryIdempotencyConflict):
         service.request_recovery(env['task'].task_id, source, 'K-conflict')
     assert resolver.calls == 1, 'a conflicting binding must not reach provider resolution'
+
+
+# -- 8.4-2D: REVISION sources are not eligible --------------------------------
+
+def _mark_source_revision_mode(env, source_run_id):
+    """Fixture-level simulation of a FAILED REVISION source run.
+
+    A revision run executes the same planner step (no run_mode branch in the
+    workflow), so a failed one owns a PlanArtifact exactly like this. Direct SQL
+    matches this file's established fixture style (cf. status moves elsewhere);
+    no production code mutates run history.
+    """
+    with env['store'].transaction() as repo:
+        repo._conn.execute("UPDATE task_runs SET run_mode='REVISION' WHERE run_id=?",
+                           (source_run_id,))
+
+
+def test_recovery_rejects_a_revision_source_run(env):
+    """A FAILED REVISION source owns an artifact but must not be recoverable.
+
+    Recovery creates run_mode=INITIAL, for which the adapter builds no
+    RevisionContext -- the human reviewer_feedback would be silently dropped.
+    """
+    source = _make_failed_task(env)
+    _mark_source_revision_mode(env, source)
+    service = _service(env)
+    with pytest.raises(RecoveryConflict):
+        service.request_recovery(env['task'].task_id, source, 'rec-revision-source')
+    _assert_nothing_created(env, 1)
+    task = _task_row(env['store'], env['task'].task_id)
+    assert task.status == Status.FAILED
+    assert task.current_run_id == source
+
+
+def test_replay_survives_a_later_source_mode_change(env):
+    """Durable replay authority precedes the run_mode eligibility guard.
+
+    The guard was added after the idempotency check on purpose: a source mutated
+    behind an already-successful request must not invalidate its replay.
+    """
+    source = _make_failed_task(env)
+    service = _service(env)
+    created = service.request_recovery(env['task'].task_id, source, 'K-mode')
+    recovery_run_id = created['current_run_id']
+    _mark_source_revision_mode(env, source)
+
+    replayed = service.request_recovery(env['task'].task_id, source, 'K-mode')
+
+    assert replayed['current_run_id'] == recovery_run_id
+    with env['store'].reader() as repo:
+        assert repo._conn.execute('SELECT COUNT(*) FROM task_runs WHERE task_id=?',
+                                  (env['task'].task_id,)).fetchone()[0] == 2, 'no second run'
+        assert repo._conn.execute('SELECT COUNT(*) FROM task_recovery_requests').fetchone()[0] == 1
+        assert repo._conn.execute(
+            "SELECT COUNT(*) FROM task_events WHERE task_id=? AND type='TASK_RECOVERY_REQUESTED'",
+            (env['task'].task_id,)).fetchone()[0] == 1, 'no duplicate event'

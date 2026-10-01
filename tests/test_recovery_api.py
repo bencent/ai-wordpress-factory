@@ -453,3 +453,24 @@ def test_error_codes_are_stable_and_distinct(api):
         # Every error body carries the established envelope shape and nothing internal.
         assert set(body) == {'code', 'message', 'request_id'}
         assert isinstance(body['message'], str) and body['message']
+
+# -- L: revision source rejected at the boundary ----------------------------
+
+def test_revision_source_is_409(api):
+    """A FAILED REVISION source owns an artifact but is not recoverable in V1.
+
+    Recovery would create run_mode=INITIAL and silently drop RevisionContext, so
+    the service refuses with ordinary Recovery ineligibility: HTTP 409,
+    RECOVERY_CONFLICT, nothing created.
+    """
+    env = api
+    task = _submit(env)
+    source = _failed_source(env, task)
+    with env['store'].transaction() as repo:
+        repo._conn.execute("UPDATE task_runs SET run_mode='REVISION' WHERE run_id=?",
+                           (source,))
+    with _client(env) as client:
+        response = _recover(client, task.task_id, source, 'K-revision-source')
+    assert response.status_code == 409, response.text
+    assert response.json()['error']['code'] == 'RECOVERY_CONFLICT'
+    assert _recover_counts(env, task.task_id) == (1, 0)

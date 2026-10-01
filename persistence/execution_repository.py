@@ -236,6 +236,14 @@ class ExecutionRepositoryMixin:
         if source_row is None:
             return None
 
+        # 3b. V1 Recovery preserves INITIAL-run semantics only. A FAILED REVISION run
+        # carries RevisionContext/reviewer_feedback that an INITIAL recovery run would
+        # silently drop (the adapter builds revision context only for REVISION runs),
+        # so a non-INITIAL source is not eligible. Ordinary ineligibility: no side
+        # effects, same RecoveryConflict path as any other rejected source.
+        if source_row['run_mode'] != RunMode.INITIAL.value:
+            return None
+
         # 4. The artifact must exist, belong to this task and workspace, and verify.
         #    Absence and corruption are different: absence fails closed here, corruption
         #    raises from the domain object. Neither falls back to the Planner.
