@@ -1,6 +1,7 @@
 """Fenced observer writes and the indivisible first-version completion."""
 from dataclasses import replace
 from domain.contracts import Task, Status, ContentVersion, TaskRun, TaskEvent, RunMode
+from domain.providers import AIProviderConnection
 from .codec import encode_snapshot
 from .connection import PersistenceError
 from service.checkpoints import EVENTS, STAGES
@@ -173,6 +174,134 @@ class ExecutionRepositoryMixin:
         self.add(event)
 
         return True, None
+
+    def find_recovery_request(self, workspace_id, idempotency_key):
+        """The Recovery bound to this workspace + key, or None."""
+        return self._conn.execute(
+            'SELECT task_id,source_run_id,resulting_run_id FROM task_recovery_requests '
+            'WHERE workspace_id=? AND idempotency_key=?',
+            (workspace_id, idempotency_key)).fetchone()
+
+    def request_recovery(self, workspace_id, task_id, source_run_id,
+                         provider_connection_id, idempotency_key, now):
+        """Create the NEW run that continues from ``source_run_id``'s Plan artifact.
+
+        Runs entirely inside the caller's write transaction, so a rejection at any step
+        leaves nothing behind: no run, no queued Task, no idempotency row, no event.
+
+        Recovery is NOT retry. The source run is never touched; a new attempt is created
+        with ``run_mode=INITIAL`` and ``resumed_from_run_id`` naming the source, which
+        is what 8.4-1's reuse primitive reads. Execution provenance is the CURRENT
+        provider configuration resolved by the caller, never the source run's snapshot.
+
+        Returns ``(Task, TaskRun)`` on success and ``None`` when recovery is not
+        permitted right now. Raises ``ValueError('IDEMPOTENCY_CONFLICT')`` when this key
+        is already bound to a different task or source.
+        """
+        from uuid import uuid4
+        from domain.providers import Capability
+        self._write()
+
+        # 1. Idempotency FIRST, so a replay survives the task having moved on since.
+        existing = self._conn.execute(
+            'SELECT task_id,source_run_id,resulting_run_id FROM task_recovery_requests '
+            'WHERE workspace_id=? AND idempotency_key=?',
+            (workspace_id, idempotency_key)).fetchone()
+        if existing is not None:
+            if existing['task_id'] != task_id or existing['source_run_id'] != source_run_id:
+                raise ValueError('IDEMPOTENCY_CONFLICT')
+            existing_run = self.get(TaskRun, existing['resulting_run_id'])
+            task = self.get(Task, task_id)
+            return (task, existing_run)
+
+        # 2. Task must exist in an ACTIVE workspace and still be FAILED. WORKER_LOST is
+        #    deliberately not recoverable in this slice.
+        task_row = self._conn.execute(
+            'SELECT t.* FROM tasks t JOIN workspaces w ON w.workspace_id=t.workspace_id '
+            "WHERE t.workspace_id=? AND t.task_id=? AND w.status='ACTIVE'",
+            (workspace_id, task_id)).fetchone()
+        if task_row is None:
+            return None
+        task = self._decode(Task, task_row)
+        if task.status != Status.FAILED:
+            return None
+
+        # 3. The source must be this task's CURRENT run. A historical failed run is not
+        #    a recovery target; that keeps the CAS below meaningful.
+        if task.current_run_id != source_run_id:
+            return None
+        source_row = self._conn.execute(
+            'SELECT * FROM task_runs WHERE task_id=? AND run_id=?',
+            (task_id, source_run_id)).fetchone()
+        if source_row is None:
+            return None
+
+        # 4. The artifact must exist, belong to this task and workspace, and verify.
+        #    Absence and corruption are different: absence fails closed here, corruption
+        #    raises from the domain object. Neither falls back to the Planner.
+        artifact = self.get_plan_artifact(workspace_id, source_run_id)
+        if artifact is None:
+            return None
+        if artifact.task_id != task_id or artifact.workspace_id != workspace_id:
+            return None
+        artifact.verified()
+
+        # 5. Resolve and validate the CURRENT provider authority. The caller supplies only
+        #    the connection id resolved from the submission profile; loading and
+        #    validating it here keeps the snapshot authoritative at commit time.
+        connection = self.get(AIProviderConnection, provider_connection_id)
+        if connection is None or connection.workspace_id != workspace_id:
+            return None
+        if Capability.TEXT not in connection.capabilities:
+            return None
+
+        # 6. Next attempt, in the same per-task sequence as Initial/Retry/Revision.
+        attempt = self._conn.execute(
+            'SELECT MAX(r.attempt)+1 FROM task_runs r JOIN tasks t ON t.task_id=r.task_id '
+            'WHERE t.workspace_id=? AND t.task_id=?', (workspace_id, task_id)).fetchone()[0]
+
+        # 7. NEW run. INITIAL mode plus explicit lineage; no RECOVERY enum, no workflow
+        #    state and no checkpoint resume. Provider snapshot is CURRENT, not copied.
+        run = TaskRun(
+            run_id=str(uuid4()), task_id=task_id, attempt=attempt,
+            created_at=now, updated_at=now, run_mode=RunMode.INITIAL,
+            status=Status.QUEUED, provider_connection_id=connection.provider_connection_id,
+            provider_type=connection.provider_type,
+            provider_mode=connection.provider_mode, model=connection.default_model,
+            provider_configuration_version=connection.configuration_version,
+            resumed_from_run_id=source_run_id)
+        self.add(run)
+
+        # 8. CAS the task forward. Guarded on status AND on the source still being
+        #    current, so a concurrent move cannot be recovered around.
+        changed = self._conn.execute(
+            "UPDATE tasks SET status='QUEUED',current_run_id=?,updated_at=? "
+            'WHERE workspace_id=? AND task_id=? AND current_run_id=? AND status=?',
+            (run.run_id, now, workspace_id, task_id, source_run_id, Status.FAILED.value)).rowcount
+        if changed != 1:
+            raise PersistenceError('Recovery conflict')
+
+        # 9. Durable audit of the request, with both runs named.
+        sequence = self._conn.execute(
+            'SELECT COALESCE(MAX(sequence_number),0)+1 FROM task_events WHERE task_id=?',
+            (task_id,)).fetchone()[0]
+        self.add(TaskEvent(
+            event_id=str(uuid4()), event_key='recovery:' + run.run_id, task_id=task_id,
+            run_id=run.run_id, attempt=attempt, sequence_number=sequence,
+            type='TASK_RECOVERY_REQUESTED', actor='system', status=Status.QUEUED,
+            summary='任務已要求復原，將沿用已驗證的成品繼續執行',
+            created_at=now,
+            metadata={'source_run_id': source_run_id, 'recovery_run_id': run.run_id}))
+
+        # 10. Idempotency record. UNIQUE(resulting_run_id) means a run cannot be claimed
+        #     by two requests.
+        self._conn.execute(
+            'INSERT INTO task_recovery_requests'
+            '(workspace_id,task_id,idempotency_key,source_run_id,resulting_run_id,created_at)'
+            ' VALUES (?,?,?,?,?,?)',
+            (workspace_id, task_id, idempotency_key, source_run_id, run.run_id, now))
+
+        return (self.get(Task, task_id), run)
 
     def request_revision(self, workspace_id: str, task_id: str, content_version_id: str,
                           feedback: str, idempotency_key: str, now: str):

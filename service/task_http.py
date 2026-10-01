@@ -21,6 +21,10 @@ UI_LIMITS={'topic_min':3,'topic_max':150,'brief_min':20,'brief_max':5000}
 class RetryConflict(ValueError): pass
 class RetryIdempotencyConflict(ValueError): pass
 class RevisionConflict(ValueError): pass
+# Recovery is deliberately not Retry (AGENTS.md section 9), so it does not reuse
+# RetryConflict: collapsing them would erase the exact distinction the design turns on.
+class RecoveryConflict(ValueError): pass
+class RecoveryIdempotencyConflict(ValueError): pass
 class RevisionIdempotencyConflict(ValueError): pass
 class PublishConflict(ValueError): pass
 class PublishIdempotencyConflict(ValueError): pass
@@ -322,6 +326,83 @@ class TaskHTTPService:
             updated=repo.retry_task(task_id,task.current_run_id,task.status,idempotency_key,self.clock().isoformat())
             if updated is None: raise RetryConflict()
             return task_view(updated)
+
+    def request_recovery(self, task_id, source_run_id, idempotency_key):
+        """Request a Recovery run that continues from ``source_run_id``'s Plan artifact.
+
+        Recovery reuses durable, verified work; Retry re-executes from the start. This
+        creates NEW execution history and never touches the failed source run.
+
+        Ordering is load-bearing: the durable idempotency record is consulted BEFORE any
+        mutable provider authority. A client that retries after losing a successful
+        response must replay the run it already caused, even though the task has since
+        moved on and the profile or provider configuration may since have changed or
+        become unavailable. Re-resolving mutable authority first would turn a successful
+        request into a failure the caller could not distinguish from a real rejection.
+
+        On a replay nothing mutable is consulted: not the resolver, not the current
+        provider, not the artifact, and not the task's current status or run pointer. The
+        durable request record is the replay authority.
+        """
+        if (type(idempotency_key) is not str or not 1 <= len(idempotency_key) <= 200
+                or not idempotency_key.strip()):
+            raise ValidationError('idempotency_key')
+        if type(source_run_id) is not str or not source_run_id.strip():
+            raise ValidationError('source_run_id')
+        context = self.context()
+
+        # 1. Idempotency first, in read-only scope. A binding mismatch is refused here
+        #    too, so a recycled key cannot reach provider resolution either.
+        with self.store.workspace_reader(context.workspace_id) as reader:
+            existing = reader.find_recovery_request(idempotency_key)
+            if existing is not None:
+                if existing[0] != task_id or existing[1] != source_run_id:
+                    raise RecoveryIdempotencyConflict()
+                replayed = reader.get_task(task_id)
+                if replayed is None:
+                    raise TaskNotFound()
+                return task_view(replayed)
+            task = reader.get_task(task_id)
+            if task is None:
+                raise TaskNotFound()
+
+        # 2. Only a genuinely new request resolves current provider authority. Resolution
+        #    stays outside the write transaction: it reads the profiles file, and doing
+        #    file I/O while holding the SQLite write lock would be a new hazard.
+        try:
+            profile = self.resolver(context, task.site_id, task.brand_profile_id)
+        except Exception:
+            raise RecoveryConflict('provider authority is unavailable') from None
+        if (not isinstance(profile, SubmissionProfile)
+                or profile.workspace_id != context.workspace_id
+                or type(profile.provider_connection_id) is not str
+                or not profile.provider_connection_id
+                or profile.site_id != task.site_id):
+            raise RecoveryConflict('provider authority is invalid')
+
+        # 3. Create. The repository repeats the idempotency check first, which is what
+        #    actually settles a race between two identical concurrent requests.
+        with self.store.workspace_transaction(context.workspace_id) as repo:
+            existing = repo.find_recovery_request(idempotency_key)
+            if existing is not None:
+                if existing[0] != task_id or existing[1] != source_run_id:
+                    raise RecoveryIdempotencyConflict()
+                replayed = repo.get_task(task_id)
+                if replayed is None:
+                    raise TaskNotFound()
+                return task_view(replayed)
+            try:
+                result = repo.request_recovery(task_id, source_run_id,
+                                               profile.provider_connection_id,
+                                               idempotency_key, self.clock().isoformat())
+            except ValueError as error:
+                if str(error) == 'IDEMPOTENCY_CONFLICT':
+                    raise RecoveryIdempotencyConflict() from None
+                raise
+            if result is None:
+                raise RecoveryConflict()
+            recovered, _ = result
+            return task_view(recovered)
 
     def request_revision(self, task_id, content_version_id, feedback, idempotency_key):
         if (type(idempotency_key) is not str or not 1 <= len(idempotency_key) <= 200

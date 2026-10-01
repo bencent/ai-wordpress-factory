@@ -207,7 +207,7 @@ class TestMigration0012:
     def test_migration_0012_applies(self, store):
         versions = [r[0] for r in db_read(
             store, "SELECT version FROM schema_migrations ORDER BY version")]
-        assert versions == list(range(1, 16))
+        assert versions == list(range(1, 17))
 
     def test_table_remains_strict(self, store):
         for table in ("task_publication_requests", "publishing_targets"):

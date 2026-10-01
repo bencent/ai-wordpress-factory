@@ -182,6 +182,17 @@ class SQLiteWorkspaceRepository:
             raise PersistenceError('run not found for plan reuse record')
         return self._internal.record_plan_artifact_reuse(row, source_run_id, artifact_id, now)
 
+    def find_recovery_request(self, idempotency_key):
+        """The Recovery bound to this workspace + key, or None."""
+        return self._internal.find_recovery_request(self._workspace_id, idempotency_key)
+
+    def request_recovery(self, task_id, source_run_id, provider_connection_id,
+                         idempotency_key, now):
+        """Create the new run that continues from ``source_run_id``'s Plan artifact."""
+        return self._internal.request_recovery(
+            self._workspace_id, task_id, source_run_id, provider_connection_id,
+            idempotency_key, now)
+
     def get_provider_connection(self, provider_connection_id):
         row = self._internal._conn.execute(
             "SELECT p.* FROM ai_provider_connections p JOIN workspaces w ON w.workspace_id=p.workspace_id "
